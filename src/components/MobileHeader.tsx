@@ -1,15 +1,16 @@
 "use client";
 
 import React from "react";
-import { Music, Cloud, HardDrive, Plus } from "lucide-react";
+import { Music, Cloud, HardDrive, Plus, User } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { useLibrary } from "@/lib/library-context";
 
 interface MobileHeaderProps {
   onOpenAddModal: () => void;
+  onOpenAuthModal: () => void;
 }
 
-export function MobileHeader({ onOpenAddModal }: MobileHeaderProps) {
+export function MobileHeader({ onOpenAddModal, onOpenAuthModal }: MobileHeaderProps) {
   const { isCloudSync } = useLibrary();
 
   return (
@@ -21,13 +22,18 @@ export function MobileHeader({ onOpenAddModal }: MobileHeaderProps) {
         <span className="text-sm font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
           Minimal
         </span>
-        <div className="flex items-center text-[10px] text-zinc-400 gap-1 ml-1">
+        <button
+          onClick={onOpenAuthModal}
+          aria-label="Cloud sync settings"
+          className="flex items-center text-[10px] text-zinc-400 gap-1 ml-1 px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 active:scale-95 transition-transform"
+        >
           {isCloudSync ? (
             <Cloud className="w-3 h-3 text-emerald-500" />
           ) : (
             <HardDrive className="w-3 h-3 text-zinc-400" />
           )}
-        </div>
+          <span className="text-[9px]">{isCloudSync ? "Sync" : "Local"}</span>
+        </button>
       </div>
 
       <div className="flex items-center gap-1">
@@ -37,6 +43,13 @@ export function MobileHeader({ onOpenAddModal }: MobileHeaderProps) {
           className="p-2 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-zinc-100 transition-colors"
         >
           <Plus className="w-4 h-4" />
+        </button>
+        <button
+          onClick={onOpenAuthModal}
+          aria-label="Account"
+          className="p-2 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-zinc-100 transition-colors"
+        >
+          <User className="w-4 h-4" />
         </button>
         <ThemeToggle />
       </div>

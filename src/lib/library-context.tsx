@@ -4,6 +4,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import { Song, Playlist } from "./types";
 import { SAMPLE_SONGS, SAMPLE_PLAYLISTS } from "./sample-data";
 import { supabase, isSupabaseConfigured } from "./supabase/client";
+import { useAuth } from "./auth-context";
 
 interface LibraryContextType {
   songs: Song[];
@@ -39,16 +40,19 @@ interface SupabasePlaylistRow {
 }
 
 export function LibraryProvider({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
   const [songs, setSongs] = useState<Song[]>([]);
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [playlistSongsMap, setPlaylistSongsMap] = useState<Record<string, string[]>>({});
   const [isLoading, setIsLoading] = useState(true);
 
-  // Load initial data
+  const isCloudSync = Boolean(isSupabaseConfigured && supabase && user);
+
+  // Load data from Supabase (when authenticated) or LocalStorage fallback
   const loadData = useCallback(async () => {
     try {
-      if (isSupabaseConfigured && supabase) {
-        // Fetch from Supabase
+      if (isSupabaseConfigured && supabase && user) {
+        // Authenticated Supabase fetch: RLS automatically scopes to auth.uid() = user.id
         const { data: songsData, error: songsErr } = await supabase
           .from("songs")
           .select("*")
@@ -71,7 +75,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           setPlaylists(formatted);
         }
       } else {
-        // LocalStorage fallback
+        // LocalStorage fallback for unauthenticated / offline guests
         const savedSongs = localStorage.getItem(STORAGE_KEY_SONGS);
         const savedPlaylists = localStorage.getItem(STORAGE_KEY_PLAYLISTS);
         const savedMap = localStorage.getItem(STORAGE_KEY_PLAYLIST_SONGS);
@@ -106,7 +110,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     loadData();
@@ -119,11 +123,16 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       const newSong: Song = {
         ...newSongData,
         id: uniqueId,
+        user_id: user?.id,
         created_at: new Date().toISOString(),
       };
 
-      if (isSupabaseConfigured && supabase) {
-        const { data, error } = await supabase.from("songs").insert([newSong]).select().single();
+      if (isCloudSync && supabase && user) {
+        const { data, error } = await supabase
+          .from("songs")
+          .insert([{ ...newSong, user_id: user.id }])
+          .select()
+          .single();
         if (error) {
           throw new Error("Failed to save song to Supabase: " + error.message);
         }
@@ -138,118 +147,131 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         return newSong;
       }
     },
-    []
+    [isCloudSync, user]
   );
 
   // Delete song
-  const deleteSong = useCallback(async (id: string) => {
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from("songs").delete().eq("id", id);
-      if (error) throw new Error(error.message);
-    }
-
-    setSongs((prev) => {
-      const updated = prev.filter((s) => s.id !== id);
-      if (!isSupabaseConfigured) {
-        localStorage.setItem(STORAGE_KEY_SONGS, JSON.stringify(updated));
+  const deleteSong = useCallback(
+    async (id: string) => {
+      if (isCloudSync && supabase && user) {
+        const { error } = await supabase.from("songs").delete().eq("id", id);
+        if (error) throw new Error(error.message);
       }
-      return updated;
-    });
 
-    // Remove from playlist maps
-    setPlaylistSongsMap((prev) => {
-      const nextMap: Record<string, string[]> = {};
-      for (const [plId, songIds] of Object.entries(prev)) {
-        nextMap[plId] = songIds.filter((sid) => sid !== id);
-      }
-      if (!isSupabaseConfigured) {
-        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
-      }
-      return nextMap;
-    });
-  }, []);
-
-  // Create playlist
-  const createPlaylist = useCallback(async (name: string, description?: string): Promise<Playlist> => {
-    const uniqueId = crypto.randomUUID();
-    const newPlaylist: Playlist = {
-      id: uniqueId,
-      name,
-      description,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      song_count: 0,
-    };
-
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase
-        .from("playlists")
-        .insert([{ id: uniqueId, name, description }])
-        .select()
-        .single();
-      if (error) throw new Error(error.message);
-      setPlaylists((prev) => [data, ...prev]);
-      return data;
-    } else {
-      setPlaylists((prev) => {
-        const updated = [newPlaylist, ...prev];
-        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+      setSongs((prev) => {
+        const updated = prev.filter((s) => s.id !== id);
+        if (!isCloudSync) {
+          localStorage.setItem(STORAGE_KEY_SONGS, JSON.stringify(updated));
+        }
         return updated;
       });
-      setPlaylistSongsMap((prev) => ({ ...prev, [uniqueId]: [] }));
-      return newPlaylist;
-    }
-  }, []);
+
+      // Remove from playlist maps
+      setPlaylistSongsMap((prev) => {
+        const nextMap: Record<string, string[]> = {};
+        for (const [plId, songIds] of Object.entries(prev)) {
+          nextMap[plId] = songIds.filter((sid) => sid !== id);
+        }
+        if (!isCloudSync) {
+          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+        }
+        return nextMap;
+      });
+    },
+    [isCloudSync, user]
+  );
+
+  // Create playlist
+  const createPlaylist = useCallback(
+    async (name: string, description?: string): Promise<Playlist> => {
+      const uniqueId = crypto.randomUUID();
+      const newPlaylist: Playlist = {
+        id: uniqueId,
+        user_id: user?.id,
+        name,
+        description,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        song_count: 0,
+      };
+
+      if (isCloudSync && supabase && user) {
+        const { data, error } = await supabase
+          .from("playlists")
+          .insert([{ id: uniqueId, user_id: user.id, name, description }])
+          .select()
+          .single();
+        if (error) throw new Error(error.message);
+        setPlaylists((prev) => [data, ...prev]);
+        return data;
+      } else {
+        setPlaylists((prev) => {
+          const updated = [newPlaylist, ...prev];
+          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+          return updated;
+        });
+        setPlaylistSongsMap((prev) => ({ ...prev, [uniqueId]: [] }));
+        return newPlaylist;
+      }
+    },
+    [isCloudSync, user]
+  );
 
   // Rename playlist
-  const renamePlaylist = useCallback(async (id: string, name: string) => {
-    const updatedAt = new Date().toISOString();
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase
-        .from("playlists")
-        .update({ name, updated_at: updatedAt })
-        .eq("id", id);
-      if (error) throw new Error(error.message);
-    }
-
-    setPlaylists((prev) => {
-      const updated = prev.map((p) => (p.id === id ? { ...p, name, updated_at: updatedAt } : p));
-      if (!isSupabaseConfigured) {
-        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+  const renamePlaylist = useCallback(
+    async (id: string, name: string) => {
+      const updatedAt = new Date().toISOString();
+      if (isCloudSync && supabase && user) {
+        const { error } = await supabase
+          .from("playlists")
+          .update({ name, updated_at: updatedAt })
+          .eq("id", id);
+        if (error) throw new Error(error.message);
       }
-      return updated;
-    });
-  }, []);
+
+      setPlaylists((prev) => {
+        const updated = prev.map((p) => (p.id === id ? { ...p, name, updated_at: updatedAt } : p));
+        if (!isCloudSync) {
+          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+        }
+        return updated;
+      });
+    },
+    [isCloudSync, user]
+  );
 
   // Delete playlist
-  const deletePlaylist = useCallback(async (id: string) => {
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from("playlists").delete().eq("id", id);
-      if (error) throw new Error(error.message);
-    }
-
-    setPlaylists((prev) => {
-      const updated = prev.filter((p) => p.id !== id);
-      if (!isSupabaseConfigured) {
-        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+  const deletePlaylist = useCallback(
+    async (id: string) => {
+      if (isCloudSync && supabase && user) {
+        const { error } = await supabase.from("playlists").delete().eq("id", id);
+        if (error) throw new Error(error.message);
       }
-      return updated;
-    });
 
-    setPlaylistSongsMap((prev) => {
-      const nextMap = { ...prev };
-      delete nextMap[id];
-      if (!isSupabaseConfigured) {
-        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
-      }
-      return nextMap;
-    });
-  }, []);
+      setPlaylists((prev) => {
+        const updated = prev.filter((p) => p.id !== id);
+        if (!isCloudSync) {
+          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+        }
+        return updated;
+      });
+
+      setPlaylistSongsMap((prev) => {
+        const nextMap = { ...prev };
+        delete nextMap[id];
+        if (!isCloudSync) {
+          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+        }
+        return nextMap;
+      });
+    },
+    [isCloudSync, user]
+  );
 
   // Get playlist songs in ordered sequence
   const getPlaylistSongs = useCallback(
     async (playlistId: string): Promise<Song[]> => {
-      if (isSupabaseConfigured && supabase) {
+      if (isCloudSync && supabase && user) {
         const { data, error } = await supabase
           .from("playlist_songs")
           .select("song_id, position, songs(*)")
@@ -264,14 +286,13 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         return songIds.map((id) => songMap.get(id)).filter((s): s is Song => Boolean(s));
       }
     },
-    [songs, playlistSongsMap]
+    [isCloudSync, user, songs, playlistSongsMap]
   );
 
   // Add song to playlist
   const addSongToPlaylist = useCallback(
     async (playlistId: string, songId: string) => {
-      if (isSupabaseConfigured && supabase) {
-        // Find highest position
+      if (isCloudSync && supabase && user) {
         const { data } = await supabase
           .from("playlist_songs")
           .select("position")
@@ -299,20 +320,19 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         });
       }
 
-      // Update count on playlist object
       setPlaylists((prev) =>
         prev.map((p) =>
           p.id === playlistId ? { ...p, song_count: (p.song_count || 0) + 1 } : p
         )
       );
     },
-    []
+    [isCloudSync, user]
   );
 
   // Remove song from playlist
   const removeSongFromPlaylist = useCallback(
     async (playlistId: string, songId: string) => {
-      if (isSupabaseConfigured && supabase) {
+      if (isCloudSync && supabase && user) {
         const { error } = await supabase
           .from("playlist_songs")
           .delete()
@@ -336,14 +356,13 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         )
       );
     },
-    []
+    [isCloudSync, user]
   );
 
   // Reorder playlist songs
   const reorderPlaylistSongs = useCallback(
     async (playlistId: string, reorderedSongIds: string[]) => {
-      if (isSupabaseConfigured && supabase) {
-        // Upsert positions in Supabase
+      if (isCloudSync && supabase && user) {
         const updates = reorderedSongIds.map((songId, index) => ({
           playlist_id: playlistId,
           song_id: songId,
@@ -365,7 +384,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         });
       }
     },
-    []
+    [isCloudSync, user]
   );
 
   return (
@@ -374,7 +393,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         songs,
         playlists,
         isLoading,
-        isCloudSync: isSupabaseConfigured,
+        isCloudSync,
         addSong,
         deleteSong,
         createPlaylist,

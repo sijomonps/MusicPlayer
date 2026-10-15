@@ -1,18 +1,26 @@
 "use client";
 
 import React from "react";
-import { Music, ListMusic, Plus, Cloud, HardDrive } from "lucide-react";
+import { Music, ListMusic, Plus, Cloud, HardDrive, LogIn, User } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { useLibrary } from "@/lib/library-context";
+import { useAuth } from "@/lib/auth-context";
 
 interface SidebarProps {
   currentTab: "songs" | "playlists";
   onTabChange: (tab: "songs" | "playlists") => void;
   onOpenAddModal: () => void;
+  onOpenAuthModal: () => void;
 }
 
-export function Sidebar({ currentTab, onTabChange, onOpenAddModal }: SidebarProps) {
+export function Sidebar({
+  currentTab,
+  onTabChange,
+  onOpenAddModal,
+  onOpenAuthModal,
+}: SidebarProps) {
   const { isCloudSync, playlists } = useLibrary();
+  const { user } = useAuth();
 
   return (
     <aside className="hidden md:flex flex-col justify-between w-64 border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 p-6 h-screen sticky top-0 shrink-0">
@@ -72,21 +80,37 @@ export function Sidebar({ currentTab, onTabChange, onOpenAddModal }: SidebarProp
         </nav>
       </div>
 
-      {/* Footer Status */}
-      <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800/80">
-        <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+      {/* Footer Status & Auth Trigger */}
+      <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800/80 space-y-2">
+        <button
+          onClick={onOpenAuthModal}
+          className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors text-left"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            {isCloudSync ? (
+              <div className="w-6 h-6 rounded-lg bg-emerald-500/10 text-emerald-500 flex items-center justify-center shrink-0">
+                <Cloud className="w-3.5 h-3.5" />
+              </div>
+            ) : (
+              <div className="w-6 h-6 rounded-lg bg-zinc-200 dark:bg-zinc-800 text-zinc-500 flex items-center justify-center shrink-0">
+                <HardDrive className="w-3.5 h-3.5" />
+              </div>
+            )}
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-zinc-900 dark:text-zinc-100 truncate">
+                {isCloudSync ? user?.email || "Cloud Connected" : "Local Storage"}
+              </p>
+              <p className="text-[10px] text-zinc-400 truncate">
+                {isCloudSync ? "Supabase Active" : "Click to Sign In & Sync"}
+              </p>
+            </div>
+          </div>
           {isCloudSync ? (
-            <>
-              <Cloud className="w-4 h-4 text-emerald-500" />
-              <span>Supabase & R2 Active</span>
-            </>
+            <User className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
           ) : (
-            <>
-              <HardDrive className="w-4 h-4 text-zinc-400" />
-              <span>Local Storage Mode</span>
-            </>
+            <LogIn className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
           )}
-        </div>
+        </button>
       </div>
     </aside>
   );

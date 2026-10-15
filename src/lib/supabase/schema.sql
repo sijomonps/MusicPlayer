@@ -1,5 +1,7 @@
+-- ====================================================================
 -- Supabase Database Schema for Minimal Music Player
--- Run this in the Supabase SQL Editor
+-- Run this script in your Supabase Project Dashboard > SQL Editor
+-- ====================================================================
 
 -- 1. Create songs table
 CREATE TABLE IF NOT EXISTS public.songs (
@@ -37,7 +39,7 @@ CREATE TABLE IF NOT EXISTS public.playlist_songs (
     UNIQUE(playlist_id, song_id)
 );
 
--- Indexes for performance
+-- Indexes for fast queries
 CREATE INDEX IF NOT EXISTS idx_songs_user_id ON public.songs(user_id);
 CREATE INDEX IF NOT EXISTS idx_songs_created_at ON public.songs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_playlists_user_id ON public.playlists(user_id);
@@ -49,14 +51,36 @@ ALTER TABLE public.songs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.playlists ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.playlist_songs ENABLE ROW LEVEL SECURITY;
 
--- 5. RLS Policies for songs
-CREATE POLICY "Users can view their own songs or public demo songs"
+-- 5. Drop existing policies if they exist (idempotent migration)
+DROP POLICY IF EXISTS "Users can view their own songs or public demo songs" ON public.songs;
+DROP POLICY IF EXISTS "Users can view their own songs" ON public.songs;
+DROP POLICY IF EXISTS "Users can insert their own songs" ON public.songs;
+DROP POLICY IF EXISTS "Users can update their own songs" ON public.songs;
+DROP POLICY IF EXISTS "Users can delete their own songs" ON public.songs;
+
+DROP POLICY IF EXISTS "Users can view their own playlists" ON public.playlists;
+DROP POLICY IF EXISTS "Users can insert their own playlists" ON public.playlists;
+DROP POLICY IF EXISTS "Users can update their own playlists" ON public.playlists;
+DROP POLICY IF EXISTS "Users can delete their own playlists" ON public.playlists;
+
+DROP POLICY IF EXISTS "Users can view songs in their playlists" ON public.playlist_songs;
+DROP POLICY IF EXISTS "Users can insert songs into their playlists" ON public.playlist_songs;
+DROP POLICY IF EXISTS "Users can update song order in their playlists" ON public.playlist_songs;
+DROP POLICY IF EXISTS "Users can delete songs from their playlists" ON public.playlist_songs;
+
+-- 6. Clean up any unauthenticated orphaned test rows
+DELETE FROM public.playlist_songs WHERE playlist_id IN (SELECT id FROM public.playlists WHERE user_id IS NULL);
+DELETE FROM public.playlists WHERE user_id IS NULL;
+DELETE FROM public.songs WHERE user_id IS NULL;
+
+-- 7. RLS Policies for songs (Private per user)
+CREATE POLICY "Users can view their own songs"
     ON public.songs FOR SELECT
-    USING (auth.uid() = user_id OR user_id IS NULL);
+    USING (auth.uid() = user_id);
 
 CREATE POLICY "Users can insert their own songs"
     ON public.songs FOR INSERT
-    WITH CHECK (auth.uid() = user_id OR auth.uid() IS NULL);
+    WITH CHECK (auth.uid() = user_id);
 
 CREATE POLICY "Users can update their own songs"
     ON public.songs FOR UPDATE
@@ -67,14 +91,14 @@ CREATE POLICY "Users can delete their own songs"
     ON public.songs FOR DELETE
     USING (auth.uid() = user_id);
 
--- 6. RLS Policies for playlists
+-- 8. RLS Policies for playlists (Private per user)
 CREATE POLICY "Users can view their own playlists"
     ON public.playlists FOR SELECT
-    USING (auth.uid() = user_id OR user_id IS NULL);
+    USING (auth.uid() = user_id);
 
 CREATE POLICY "Users can insert their own playlists"
     ON public.playlists FOR INSERT
-    WITH CHECK (auth.uid() = user_id OR auth.uid() IS NULL);
+    WITH CHECK (auth.uid() = user_id);
 
 CREATE POLICY "Users can update their own playlists"
     ON public.playlists FOR UPDATE
@@ -85,14 +109,14 @@ CREATE POLICY "Users can delete their own playlists"
     ON public.playlists FOR DELETE
     USING (auth.uid() = user_id);
 
--- 7. RLS Policies for playlist_songs
+-- 9. RLS Policies for playlist_songs (Strict ownership via parent playlist)
 CREATE POLICY "Users can view songs in their playlists"
     ON public.playlist_songs FOR SELECT
     USING (
         EXISTS (
             SELECT 1 FROM public.playlists p
             WHERE p.id = playlist_songs.playlist_id
-            AND (p.user_id = auth.uid() OR p.user_id IS NULL)
+            AND p.user_id = auth.uid()
         )
     );
 
@@ -102,7 +126,7 @@ CREATE POLICY "Users can insert songs into their playlists"
         EXISTS (
             SELECT 1 FROM public.playlists p
             WHERE p.id = playlist_songs.playlist_id
-            AND (p.user_id = auth.uid() OR p.user_id IS NULL)
+            AND p.user_id = auth.uid()
         )
     );
 
@@ -112,7 +136,7 @@ CREATE POLICY "Users can update song order in their playlists"
         EXISTS (
             SELECT 1 FROM public.playlists p
             WHERE p.id = playlist_songs.playlist_id
-            AND (p.user_id = auth.uid() OR p.user_id IS NULL)
+            AND p.user_id = auth.uid()
         )
     );
 
@@ -122,6 +146,6 @@ CREATE POLICY "Users can delete songs from their playlists"
         EXISTS (
             SELECT 1 FROM public.playlists p
             WHERE p.id = playlist_songs.playlist_id
-            AND (p.user_id = auth.uid() OR p.user_id IS NULL)
+            AND p.user_id = auth.uid()
         )
     );
