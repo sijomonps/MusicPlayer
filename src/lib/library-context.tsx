@@ -1,16 +1,13 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, { createContext, useContext, useState, useCallback } from "react";
 import { Song, Playlist } from "./types";
 import { SAMPLE_SONGS, SAMPLE_PLAYLISTS } from "./sample-data";
-import { supabase, isSupabaseConfigured } from "./supabase/client";
-import { useAuth } from "./auth-context";
 
 interface LibraryContextType {
   songs: Song[];
   playlists: Playlist[];
   isLoading: boolean;
-  isCloudSync: boolean;
   addSong: (song: Omit<Song, "id" | "created_at">) => Promise<Song>;
   deleteSong: (id: string) => Promise<void>;
   createPlaylist: (name: string, description?: string) => Promise<Playlist>;
@@ -25,367 +22,272 @@ interface LibraryContextType {
 
 const LibraryContext = createContext<LibraryContextType | null>(null);
 
-const STORAGE_KEY_SONGS = "minimal_music_songs_v1";
-const STORAGE_KEY_PLAYLISTS = "minimal_music_playlists_v1";
-const STORAGE_KEY_PLAYLIST_SONGS = "minimal_music_playlist_songs_v1";
+const STORAGE_KEY_SONGS = "minimal_player_songs_v2";
+const STORAGE_KEY_PLAYLISTS = "minimal_player_playlists_v2";
+const STORAGE_KEY_PLAYLIST_SONGS = "minimal_player_playlist_songs_v2";
 
-interface SupabasePlaylistRow {
-  id: string;
-  user_id?: string;
-  name: string;
-  description?: string;
-  created_at: string;
-  updated_at: string;
-  playlist_songs?: Array<{ count: number }>;
-}
+const DEFAULT_PLAYLIST_MAP: Record<string, string[]> = {
+  "playlist-favorites": ["sample-1", "sample-2", "sample-3"],
+  "playlist-focus": ["sample-1", "sample-2"],
+};
 
 export function LibraryProvider({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
-  const [songs, setSongs] = useState<Song[]>([]);
-  const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  const [playlistSongsMap, setPlaylistSongsMap] = useState<Record<string, string[]>>({});
-  const [isLoading, setIsLoading] = useState(true);
-
-  const isCloudSync = Boolean(isSupabaseConfigured && supabase && user);
-
-  // Load data from Supabase (when authenticated) or LocalStorage fallback
-  const loadData = useCallback(async () => {
+  // Initialize state synchronously from browser localStorage
+  const [songs, setSongs] = useState<Song[]>(() => {
+    if (typeof window === "undefined") return SAMPLE_SONGS;
     try {
-      if (isSupabaseConfigured && supabase && user) {
-        // Authenticated Supabase fetch: RLS automatically scopes to auth.uid() = user.id
-        const { data: songsData, error: songsErr } = await supabase
-          .from("songs")
-          .select("*")
-          .order("created_at", { ascending: false });
-
-        if (!songsErr && songsData) {
-          setSongs(songsData);
-        }
-
-        const { data: playlistsData, error: plErr } = await supabase
-          .from("playlists")
-          .select("*, playlist_songs(count)")
-          .order("created_at", { ascending: false });
-
-        if (!plErr && playlistsData) {
-          const formatted = (playlistsData as unknown as SupabasePlaylistRow[]).map((p) => ({
-            ...p,
-            song_count: p.playlist_songs?.[0]?.count || 0,
-          }));
-          setPlaylists(formatted);
-        }
-      } else {
-        // LocalStorage fallback for unauthenticated / offline guests
-        const savedSongs = localStorage.getItem(STORAGE_KEY_SONGS);
-        const savedPlaylists = localStorage.getItem(STORAGE_KEY_PLAYLISTS);
-        const savedMap = localStorage.getItem(STORAGE_KEY_PLAYLIST_SONGS);
-
-        if (savedSongs) {
-          setSongs(JSON.parse(savedSongs));
-        } else {
-          setSongs(SAMPLE_SONGS);
-          localStorage.setItem(STORAGE_KEY_SONGS, JSON.stringify(SAMPLE_SONGS));
-        }
-
-        if (savedPlaylists) {
-          setPlaylists(JSON.parse(savedPlaylists));
-        } else {
-          setPlaylists(SAMPLE_PLAYLISTS);
-          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(SAMPLE_PLAYLISTS));
-        }
-
-        if (savedMap) {
-          setPlaylistSongsMap(JSON.parse(savedMap));
-        } else {
-          const initialMap: Record<string, string[]> = {
-            "playlist-favorites": ["sample-1", "sample-2", "sample-3"],
-            "playlist-focus": ["sample-1", "sample-2"],
-          };
-          setPlaylistSongsMap(initialMap);
-          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(initialMap));
-        }
-      }
+      const saved = localStorage.getItem(STORAGE_KEY_SONGS);
+      if (saved) return JSON.parse(saved);
+      localStorage.setItem(STORAGE_KEY_SONGS, JSON.stringify(SAMPLE_SONGS));
     } catch (e) {
-      console.error("Error loading library data:", e);
-    } finally {
-      setIsLoading(false);
+      console.warn("Could not load songs from localStorage:", e);
     }
-  }, [user]);
+    return SAMPLE_SONGS;
+  });
 
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  const [playlists, setPlaylists] = useState<Playlist[]>(() => {
+    if (typeof window === "undefined") return SAMPLE_PLAYLISTS;
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_PLAYLISTS);
+      if (saved) return JSON.parse(saved);
+      localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(SAMPLE_PLAYLISTS));
+    } catch (e) {
+      console.warn("Could not load playlists from localStorage:", e);
+    }
+    return SAMPLE_PLAYLISTS;
+  });
 
-  // Add song
+  const [playlistSongsMap, setPlaylistSongsMap] = useState<Record<string, string[]>>(() => {
+    if (typeof window === "undefined") return DEFAULT_PLAYLIST_MAP;
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_PLAYLIST_SONGS);
+      if (saved) return JSON.parse(saved);
+      localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(DEFAULT_PLAYLIST_MAP));
+    } catch (e) {
+      console.warn("Could not load playlist order from localStorage:", e);
+    }
+    return DEFAULT_PLAYLIST_MAP;
+  });
+
+  const [isLoading] = useState(false);
+
+  // Reload data from localStorage
+  const loadData = useCallback(() => {
+    try {
+      if (typeof window === "undefined") return;
+
+      const savedSongs = localStorage.getItem(STORAGE_KEY_SONGS);
+      if (savedSongs) setSongs(JSON.parse(savedSongs));
+
+      const savedPlaylists = localStorage.getItem(STORAGE_KEY_PLAYLISTS);
+      if (savedPlaylists) setPlaylists(JSON.parse(savedPlaylists));
+
+      const savedMap = localStorage.getItem(STORAGE_KEY_PLAYLIST_SONGS);
+      if (savedMap) setPlaylistSongsMap(JSON.parse(savedMap));
+    } catch (e) {
+      console.error("Error reloading library from localStorage:", e);
+    }
+  }, []);
+
+  // Add song to library
   const addSong = useCallback(
     async (newSongData: Omit<Song, "id" | "created_at">): Promise<Song> => {
       const uniqueId = crypto.randomUUID();
       const newSong: Song = {
         ...newSongData,
         id: uniqueId,
-        user_id: user?.id,
         created_at: new Date().toISOString(),
       };
-
-      if (isCloudSync && supabase && user) {
-        const { data, error } = await supabase
-          .from("songs")
-          .insert([{ ...newSong, user_id: user.id }])
-          .select()
-          .single();
-        if (error) {
-          throw new Error("Failed to save song to Supabase: " + error.message);
-        }
-        setSongs((prev) => [data, ...prev]);
-        return data;
-      } else {
-        setSongs((prev) => {
-          const updated = [newSong, ...prev];
-          localStorage.setItem(STORAGE_KEY_SONGS, JSON.stringify(updated));
-          return updated;
-        });
-        return newSong;
-      }
-    },
-    [isCloudSync, user]
-  );
-
-  // Delete song
-  const deleteSong = useCallback(
-    async (id: string) => {
-      if (isCloudSync && supabase && user) {
-        const { error } = await supabase.from("songs").delete().eq("id", id);
-        if (error) throw new Error(error.message);
-      }
 
       setSongs((prev) => {
-        const updated = prev.filter((s) => s.id !== id);
-        if (!isCloudSync) {
+        const updated = [newSong, ...prev];
+        try {
           localStorage.setItem(STORAGE_KEY_SONGS, JSON.stringify(updated));
+        } catch (e) {
+          console.error("Failed to save song to localStorage:", e);
         }
         return updated;
       });
 
-      // Remove from playlist maps
-      setPlaylistSongsMap((prev) => {
-        const nextMap: Record<string, string[]> = {};
-        for (const [plId, songIds] of Object.entries(prev)) {
-          nextMap[plId] = songIds.filter((sid) => sid !== id);
-        }
-        if (!isCloudSync) {
-          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
-        }
-        return nextMap;
-      });
+      return newSong;
     },
-    [isCloudSync, user]
+    []
   );
+
+  // Delete song from library and playlists
+  const deleteSong = useCallback(async (id: string) => {
+    setSongs((prev) => {
+      const updated = prev.filter((s) => s.id !== id);
+      try {
+        localStorage.setItem(STORAGE_KEY_SONGS, JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to update songs in localStorage:", e);
+      }
+      return updated;
+    });
+
+    setPlaylistSongsMap((prev) => {
+      const nextMap: Record<string, string[]> = {};
+      for (const [plId, songIds] of Object.entries(prev)) {
+        nextMap[plId] = songIds.filter((sid) => sid !== id);
+      }
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+      } catch (e) {
+        console.error("Failed to update playlist songs in localStorage:", e);
+      }
+      return nextMap;
+    });
+  }, []);
 
   // Create playlist
-  const createPlaylist = useCallback(
-    async (name: string, description?: string): Promise<Playlist> => {
-      const uniqueId = crypto.randomUUID();
-      const newPlaylist: Playlist = {
-        id: uniqueId,
-        user_id: user?.id,
-        name,
-        description,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        song_count: 0,
-      };
+  const createPlaylist = useCallback(async (name: string, description?: string): Promise<Playlist> => {
+    const uniqueId = crypto.randomUUID();
+    const newPlaylist: Playlist = {
+      id: uniqueId,
+      name,
+      description,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      song_count: 0,
+    };
 
-      if (isCloudSync && supabase && user) {
-        const { data, error } = await supabase
-          .from("playlists")
-          .insert([{ id: uniqueId, user_id: user.id, name, description }])
-          .select()
-          .single();
-        if (error) throw new Error(error.message);
-        setPlaylists((prev) => [data, ...prev]);
-        return data;
-      } else {
-        setPlaylists((prev) => {
-          const updated = [newPlaylist, ...prev];
-          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
-          return updated;
-        });
-        setPlaylistSongsMap((prev) => ({ ...prev, [uniqueId]: [] }));
-        return newPlaylist;
+    setPlaylists((prev) => {
+      const updated = [newPlaylist, ...prev];
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to save playlist in localStorage:", e);
       }
-    },
-    [isCloudSync, user]
-  );
+      return updated;
+    });
+
+    setPlaylistSongsMap((prev) => {
+      const nextMap = { ...prev, [uniqueId]: [] };
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+      } catch (e) {
+        console.error("Failed to save playlist map in localStorage:", e);
+      }
+      return nextMap;
+    });
+
+    return newPlaylist;
+  }, []);
 
   // Rename playlist
-  const renamePlaylist = useCallback(
-    async (id: string, name: string) => {
-      const updatedAt = new Date().toISOString();
-      if (isCloudSync && supabase && user) {
-        const { error } = await supabase
-          .from("playlists")
-          .update({ name, updated_at: updatedAt })
-          .eq("id", id);
-        if (error) throw new Error(error.message);
+  const renamePlaylist = useCallback(async (id: string, name: string) => {
+    const updatedAt = new Date().toISOString();
+    setPlaylists((prev) => {
+      const updated = prev.map((p) => (p.id === id ? { ...p, name, updated_at: updatedAt } : p));
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to update playlist in localStorage:", e);
       }
-
-      setPlaylists((prev) => {
-        const updated = prev.map((p) => (p.id === id ? { ...p, name, updated_at: updatedAt } : p));
-        if (!isCloudSync) {
-          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
-        }
-        return updated;
-      });
-    },
-    [isCloudSync, user]
-  );
+      return updated;
+    });
+  }, []);
 
   // Delete playlist
-  const deletePlaylist = useCallback(
-    async (id: string) => {
-      if (isCloudSync && supabase && user) {
-        const { error } = await supabase.from("playlists").delete().eq("id", id);
-        if (error) throw new Error(error.message);
+  const deletePlaylist = useCallback(async (id: string) => {
+    setPlaylists((prev) => {
+      const updated = prev.filter((p) => p.id !== id);
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to update playlists in localStorage:", e);
       }
+      return updated;
+    });
 
-      setPlaylists((prev) => {
-        const updated = prev.filter((p) => p.id !== id);
-        if (!isCloudSync) {
-          localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
-        }
-        return updated;
-      });
+    setPlaylistSongsMap((prev) => {
+      const nextMap = { ...prev };
+      delete nextMap[id];
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+      } catch (e) {
+        console.error("Failed to update playlist songs in localStorage:", e);
+      }
+      return nextMap;
+    });
+  }, []);
 
-      setPlaylistSongsMap((prev) => {
-        const nextMap = { ...prev };
-        delete nextMap[id];
-        if (!isCloudSync) {
-          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
-        }
-        return nextMap;
-      });
-    },
-    [isCloudSync, user]
-  );
-
-  // Get playlist songs in ordered sequence
+  // Get ordered songs for a playlist
   const getPlaylistSongs = useCallback(
     async (playlistId: string): Promise<Song[]> => {
-      if (isCloudSync && supabase && user) {
-        const { data, error } = await supabase
-          .from("playlist_songs")
-          .select("song_id, position, songs(*)")
-          .eq("playlist_id", playlistId)
-          .order("position", { ascending: true });
-
-        if (error || !data) return [];
-        return (data as unknown as Array<{ songs: Song }>).map((item) => item.songs).filter(Boolean);
-      } else {
-        const songIds = playlistSongsMap[playlistId] || [];
-        const songMap = new Map(songs.map((s) => [s.id, s]));
-        return songIds.map((id) => songMap.get(id)).filter((s): s is Song => Boolean(s));
-      }
+      const songIds = playlistSongsMap[playlistId] || [];
+      const songMap = new Map(songs.map((s) => [s.id, s]));
+      return songIds.map((id) => songMap.get(id)).filter((s): s is Song => Boolean(s));
     },
-    [isCloudSync, user, songs, playlistSongsMap]
+    [songs, playlistSongsMap]
   );
 
   // Add song to playlist
-  const addSongToPlaylist = useCallback(
-    async (playlistId: string, songId: string) => {
-      if (isCloudSync && supabase && user) {
-        const { data } = await supabase
-          .from("playlist_songs")
-          .select("position")
-          .eq("playlist_id", playlistId)
-          .order("position", { ascending: false })
-          .limit(1);
-
-        const nextPos = data && data[0] ? data[0].position + 1 : 0;
-
-        const { error } = await supabase.from("playlist_songs").insert([
-          {
-            playlist_id: playlistId,
-            song_id: songId,
-            position: nextPos,
-          },
-        ]);
-        if (error) throw new Error(error.message);
-      } else {
-        setPlaylistSongsMap((prev) => {
-          const current = prev[playlistId] || [];
-          if (current.includes(songId)) return prev;
-          const nextMap = { ...prev, [playlistId]: [...current, songId] };
-          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
-          return nextMap;
-        });
+  const addSongToPlaylist = useCallback(async (playlistId: string, songId: string) => {
+    setPlaylistSongsMap((prev) => {
+      const current = prev[playlistId] || [];
+      if (current.includes(songId)) return prev;
+      const nextMap = { ...prev, [playlistId]: [...current, songId] };
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+      } catch (e) {
+        console.error("Failed to save playlist songs:", e);
       }
+      return nextMap;
+    });
 
-      setPlaylists((prev) =>
-        prev.map((p) =>
-          p.id === playlistId ? { ...p, song_count: (p.song_count || 0) + 1 } : p
-        )
+    setPlaylists((prev) => {
+      const updated = prev.map((p) =>
+        p.id === playlistId ? { ...p, song_count: (p.song_count || 0) + 1 } : p
       );
-    },
-    [isCloudSync, user]
-  );
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to save playlist count:", e);
+      }
+      return updated;
+    });
+  }, []);
 
   // Remove song from playlist
-  const removeSongFromPlaylist = useCallback(
-    async (playlistId: string, songId: string) => {
-      if (isCloudSync && supabase && user) {
-        const { error } = await supabase
-          .from("playlist_songs")
-          .delete()
-          .eq("playlist_id", playlistId)
-          .eq("song_id", songId);
-        if (error) throw new Error(error.message);
-      } else {
-        setPlaylistSongsMap((prev) => {
-          const current = prev[playlistId] || [];
-          const nextMap = { ...prev, [playlistId]: current.filter((id) => id !== songId) };
-          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
-          return nextMap;
-        });
+  const removeSongFromPlaylist = useCallback(async (playlistId: string, songId: string) => {
+    setPlaylistSongsMap((prev) => {
+      const current = prev[playlistId] || [];
+      const nextMap = { ...prev, [playlistId]: current.filter((id) => id !== songId) };
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+      } catch (e) {
+        console.error("Failed to update playlist songs:", e);
       }
+      return nextMap;
+    });
 
-      setPlaylists((prev) =>
-        prev.map((p) =>
-          p.id === playlistId
-            ? { ...p, song_count: Math.max(0, (p.song_count || 1) - 1) }
-            : p
-        )
+    setPlaylists((prev) => {
+      const updated = prev.map((p) =>
+        p.id === playlistId ? { ...p, song_count: Math.max(0, (p.song_count || 1) - 1) } : p
       );
-    },
-    [isCloudSync, user]
-  );
-
-  // Reorder playlist songs
-  const reorderPlaylistSongs = useCallback(
-    async (playlistId: string, reorderedSongIds: string[]) => {
-      if (isCloudSync && supabase && user) {
-        const updates = reorderedSongIds.map((songId, index) => ({
-          playlist_id: playlistId,
-          song_id: songId,
-          position: index,
-        }));
-
-        for (const item of updates) {
-          await supabase
-            .from("playlist_songs")
-            .update({ position: item.position })
-            .eq("playlist_id", item.playlist_id)
-            .eq("song_id", item.song_id);
-        }
-      } else {
-        setPlaylistSongsMap((prev) => {
-          const nextMap = { ...prev, [playlistId]: reorderedSongIds };
-          localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
-          return nextMap;
-        });
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLISTS, JSON.stringify(updated));
+      } catch (e) {
+        console.error("Failed to update playlist count:", e);
       }
-    },
-    [isCloudSync, user]
-  );
+      return updated;
+    });
+  }, []);
+
+  // Reorder playlist songs and persist immediately
+  const reorderPlaylistSongs = useCallback(async (playlistId: string, reorderedSongIds: string[]) => {
+    setPlaylistSongsMap((prev) => {
+      const nextMap = { ...prev, [playlistId]: reorderedSongIds };
+      try {
+        localStorage.setItem(STORAGE_KEY_PLAYLIST_SONGS, JSON.stringify(nextMap));
+      } catch (e) {
+        console.error("Failed to save reordered playlist songs:", e);
+      }
+      return nextMap;
+    });
+  }, []);
 
   return (
     <LibraryContext.Provider
@@ -393,7 +295,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         songs,
         playlists,
         isLoading,
-        isCloudSync,
         addSong,
         deleteSong,
         createPlaylist,
@@ -403,7 +304,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         addSongToPlaylist,
         removeSongFromPlaylist,
         reorderPlaylistSongs,
-        refreshLibrary: loadData,
+        refreshLibrary: async () => loadData(),
       }}
     >
       {children}

@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "Cloudflare R2 is not configured. Please set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET_NAME.",
+          "Cloudflare R2 is not configured. Please set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET_NAME in your environment.",
       },
       { status: 503 }
     );
@@ -31,6 +31,20 @@ export async function POST(req: NextRequest) {
 
   try {
     const formData = await req.formData();
+
+    // Check optional upload passcode to prevent public abuse
+    const configuredSecret = process.env.UPLOAD_SECRET?.trim();
+    if (configuredSecret) {
+      const headerSecret = req.headers.get("x-upload-secret")?.trim();
+      const formSecret = (formData.get("secret") as string)?.trim();
+      if (headerSecret !== configuredSecret && formSecret !== configuredSecret) {
+        return NextResponse.json(
+          { error: "Unauthorized: Incorrect or missing upload passcode." },
+          { status: 401 }
+        );
+      }
+    }
+
     const file = formData.get("file") as File | null;
     const title = (formData.get("title") as string) || "";
     const artist = (formData.get("artist") as string) || "Unknown Artist";

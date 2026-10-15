@@ -1,18 +1,14 @@
 "use client";
 
 import React from "react";
-import { Music, Cloud, HardDrive, Plus, User } from "lucide-react";
+import { Music, Plus } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
-import { useLibrary } from "@/lib/library-context";
 
 interface MobileHeaderProps {
   onOpenAddModal: () => void;
-  onOpenAuthModal: () => void;
 }
 
-export function MobileHeader({ onOpenAddModal, onOpenAuthModal }: MobileHeaderProps) {
-  const { isCloudSync } = useLibrary();
-
+export function MobileHeader({ onOpenAddModal }: MobileHeaderProps) {
   return (
     <header className="md:hidden flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 bg-white/95 dark:bg-zinc-950/95 backdrop-blur-md sticky top-0 z-30 pt-[env(safe-area-inset-top,0.75rem)]">
       <div className="flex items-center gap-2">
@@ -22,18 +18,6 @@ export function MobileHeader({ onOpenAddModal, onOpenAuthModal }: MobileHeaderPr
         <span className="text-sm font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
           Minimal
         </span>
-        <button
-          onClick={onOpenAuthModal}
-          aria-label="Cloud sync settings"
-          className="flex items-center text-[10px] text-zinc-400 gap-1 ml-1 px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 active:scale-95 transition-transform"
-        >
-          {isCloudSync ? (
-            <Cloud className="w-3 h-3 text-emerald-500" />
-          ) : (
-            <HardDrive className="w-3 h-3 text-zinc-400" />
-          )}
-          <span className="text-[9px]">{isCloudSync ? "Sync" : "Local"}</span>
-        </button>
       </div>
 
       <div className="flex items-center gap-1">
@@ -43,13 +27,6 @@ export function MobileHeader({ onOpenAddModal, onOpenAuthModal }: MobileHeaderPr
           className="p-2 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-zinc-100 transition-colors"
         >
           <Plus className="w-4 h-4" />
-        </button>
-        <button
-          onClick={onOpenAuthModal}
-          aria-label="Account"
-          className="p-2 rounded-lg text-zinc-600 dark:text-zinc-400 hover:text-zinc-950 dark:hover:text-zinc-100 transition-colors"
-        >
-          <User className="w-4 h-4" />
         </button>
         <ThemeToggle />
       </div>

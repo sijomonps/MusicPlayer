@@ -28,6 +28,12 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadArtist, setUploadArtist] = useState("");
+  const [uploadSecret, setUploadSecret] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("minimal_upload_secret") || "";
+    }
+    return "";
+  });
 
   // Status
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -173,16 +179,27 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
       formData.append("file", selectedFile);
       formData.append("title", uploadTitle.trim());
       formData.append("artist", uploadArtist.trim());
+      if (uploadSecret.trim()) {
+        formData.append("secret", uploadSecret.trim());
+        try {
+          localStorage.setItem("minimal_upload_secret", uploadSecret.trim());
+        } catch {
+          // ignore
+        }
+      }
 
       const res = await fetch("/api/upload", {
         method: "POST",
+        headers: uploadSecret.trim() ? { "x-upload-secret": uploadSecret.trim() } : {},
         body: formData,
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        // If Cloudflare R2 is not configured on server, provide clear advice
+        if (res.status === 401) {
+          throw new Error("Unauthorized: Incorrect upload passcode. Please enter the valid passcode below.");
+        }
         if (res.status === 503) {
           throw new Error(
             "Cloudflare R2 is not configured yet. Set R2 credentials in .env.local to enable cloud uploads."
@@ -409,6 +426,19 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
                       value={uploadArtist}
                       onChange={(e) => setUploadArtist(e.target.value)}
                       placeholder="Artist"
+                      className="w-full px-3.5 py-2.5 rounded-lg text-sm bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                      Upload Passcode (Optional / If configured)
+                    </label>
+                    <input
+                      type="password"
+                      value={uploadSecret}
+                      onChange={(e) => setUploadSecret(e.target.value)}
+                      placeholder="Enter upload passcode if required"
                       className="w-full px-3.5 py-2.5 rounded-lg text-sm bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
                     />
                   </div>
