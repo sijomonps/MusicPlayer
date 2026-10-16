@@ -3,16 +3,15 @@
 import React, { useState } from "react";
 import {
   Play,
-  Pause,
-  MoreVertical,
+  MoreHorizontal,
   Trash2,
-  ListPlus,
   ExternalLink,
   Music,
   Search,
   Plus,
+  Check,
+  X,
 } from "lucide-react";
-import { YoutubeIcon } from "@/components/icons/YoutubeIcon";
 import { Song } from "@/lib/types";
 import { useAudio } from "@/lib/audio-context";
 import { useLibrary } from "@/lib/library-context";
@@ -24,13 +23,25 @@ interface SongListProps {
   onOpenAddModal: () => void;
 }
 
-export function SongList({ songs, title = "All Songs", onOpenAddModal }: SongListProps) {
+export function SongList({
+  songs,
+  title = "Tracks",
+  onOpenAddModal,
+}: SongListProps) {
   const { currentSong, isPlaying, playSong, togglePlay } = useAudio();
-  const { playlists, addSongToPlaylist, deleteSong } = useLibrary();
+  const {
+    playlists,
+    playlistSongsMap,
+    addSongToPlaylist,
+    removeSongFromPlaylist,
+    createPlaylist,
+    deleteSong,
+  } = useLibrary();
 
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeMenuSongId, setActiveMenuSongId] = useState<string | null>(null);
-  const [playlistMenuSongId, setPlaylistMenuSongId] = useState<string | null>(null);
+  const [activeMenuSong, setActiveMenuSong] = useState<Song | null>(null);
+  const [isCreatingPlaylist, setIsCreatingPlaylist] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
 
   const filteredSongs = songs.filter(
     (s) =>
@@ -49,246 +60,351 @@ export function SongList({ songs, title = "All Songs", onOpenAddModal }: SongLis
     if (currentSong?.id === song.id) {
       togglePlay();
     } else {
-      // Filter out non-streamable bookmarks from queue
-      const streamableQueue = songs.filter((s) => s.source_type !== "youtube_bookmark");
+      const streamableQueue = songs.filter(
+        (s) => s.source_type !== "youtube_bookmark"
+      );
       playSong(song, streamableQueue);
     }
   };
 
-  const handleAddToPlaylist = async (playlistId: string, songId: string) => {
-    try {
+  const handleTogglePlaylist = async (playlistId: string, songId: string) => {
+    const songIds = playlistSongsMap[playlistId] || [];
+    if (songIds.includes(songId)) {
+      await removeSongFromPlaylist(playlistId, songId);
+    } else {
       await addSongToPlaylist(playlistId, songId);
-      setPlaylistMenuSongId(null);
-      setActiveMenuSongId(null);
-    } catch (err: unknown) {
-      alert("Could not add to playlist: " + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  const handleCreateAndAdd = async () => {
+    const name = newPlaylistName.trim();
+    if (!name || !activeMenuSong) {
+      setIsCreatingPlaylist(false);
+      return;
+    }
+    try {
+      const pl = await createPlaylist(name);
+      await addSongToPlaylist(pl.id, activeMenuSong.id);
+      setNewPlaylistName("");
+      setIsCreatingPlaylist(false);
+    } catch (err) {
+      console.warn("Could not create playlist:", err);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm("Remove this song from your library?")) {
+    if (confirm("Delete track?")) {
       await deleteSong(id);
-      setActiveMenuSongId(null);
+      setActiveMenuSong(null);
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header and Search */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
+    <div className="space-y-4">
+      {/* Header & Search */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-bold tracking-tight text-white">
             {title}
           </h2>
-          <p className="text-xs sm:text-sm text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {songs.length} {songs.length === 1 ? "track" : "tracks"} in library
-          </p>
+          <span className="text-xs font-mono text-zinc-500">
+            {songs.length}
+          </span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1 sm:w-64">
-            <Search className="w-4 h-4 absolute left-3 top-3 text-zinc-400" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter songs..."
-              className="w-full pl-9 pr-3 py-2 rounded-xl text-sm bg-zinc-100 dark:bg-zinc-900 border border-transparent focus:border-zinc-300 dark:focus:border-zinc-700 text-zinc-900 dark:text-zinc-100 focus:outline-none placeholder:text-zinc-400"
-            />
-          </div>
-
-          <button
-            onClick={onOpenAddModal}
-            className="flex sm:hidden p-2 rounded-xl bg-zinc-900 dark:bg-zinc-100 text-zinc-100 dark:text-zinc-900 active:scale-95 transition-transform"
-            aria-label="Add music"
-          >
-            <Plus className="w-5 h-5" />
-          </button>
+        {/* Search Input Pill */}
+        <div className="relative flex-1 max-w-[200px] sm:max-w-xs">
+          <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search"
+            className="w-full h-8 pl-8 pr-3 rounded-full text-xs bg-white/[0.04] border border-white/[0.06] text-white placeholder:text-zinc-500 focus:outline-none focus:border-white/20 transition-all"
+          />
         </div>
       </div>
 
       {/* Empty State */}
       {filteredSongs.length === 0 ? (
-        <div className="text-center py-16 px-4 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-2xl">
-          <Music className="w-10 h-10 mx-auto text-zinc-400 stroke-1 mb-3" />
-          <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-            {searchQuery ? "No matching tracks found" : "Your library is empty"}
-          </h3>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-sm mx-auto mt-1 mb-4">
-            {searchQuery
-              ? "Try searching for a different song or artist title."
-              : "Paste an MP3/M4A link, bookmark a YouTube video, or upload your audio files to Cloudflare R2."}
+        <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
+          <Music className="w-8 h-8 text-zinc-600 stroke-1 mb-2.5" />
+          <p className="text-xs font-medium text-zinc-400">
+            {searchQuery ? "No matching tracks" : "No tracks"}
           </p>
           {!searchQuery && (
             <button
               onClick={onOpenAddModal}
-              className="px-4 py-2 rounded-xl bg-zinc-900 dark:bg-zinc-100 text-zinc-100 dark:text-zinc-900 text-xs font-medium hover:opacity-90 transition-opacity"
+              className="mt-3 px-3.5 py-1.5 rounded-full bg-white text-black text-xs font-semibold active:scale-95 transition-all cursor-pointer"
             >
-              Add Your First Song
+              + Add
             </button>
           )}
         </div>
       ) : (
-        /* Song List Table / Card Rows */
+        /* Track Rows */
         <div className="space-y-1">
           {filteredSongs.map((song) => {
             const isCurrent = currentSong?.id === song.id;
-            const isYt = song.source_type === "youtube_bookmark";
+            const isYtBookmark = song.source_type === "youtube_bookmark";
+            const isYtExtracted = song.source_type === "youtube_extracted";
+            const isDirect = song.source_type === "direct_url";
 
             return (
               <div
                 key={song.id}
-                className={`group relative flex items-center justify-between p-2.5 sm:p-3 rounded-xl transition-all duration-150 ${
+                className={`group flex items-center justify-between py-1.5 px-2.5 rounded-xl transition-all ${
                   isCurrent
-                    ? "bg-zinc-100 dark:bg-zinc-900/90 border border-zinc-200 dark:border-zinc-800"
-                    : "hover:bg-zinc-50 dark:hover:bg-zinc-900/40 border border-transparent"
+                    ? "bg-white/[0.07] border border-white/[0.08]"
+                    : "hover:bg-white/[0.03] active:bg-white/[0.05] border border-transparent"
                 }`}
               >
-                {/* Left: Index / Play Button + Artwork + Meta */}
+                {/* Left: Artwork + Title + Artist */}
                 <div
-                  className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
+                  className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer"
                   onClick={() => handlePlaySong(song)}
                 >
-                  {/* Artwork / Icon */}
-                  <div className="relative w-11 h-11 rounded-lg bg-zinc-200 dark:bg-zinc-800 overflow-hidden shrink-0 flex items-center justify-center border border-zinc-200/50 dark:border-zinc-700/50">
+                  {/* Artwork / Equalizer Overlay */}
+                  <div className="relative w-10 h-10 rounded-lg bg-white/[0.04] border border-white/[0.08] overflow-hidden shrink-0 flex items-center justify-center">
                     {song.artwork_url ? (
                       <img
                         src={song.artwork_url}
-                        alt={song.title}
+                        alt=""
                         className="w-full h-full object-cover"
                       />
                     ) : (
-                      <Music className="w-5 h-5 text-zinc-400" />
+                      <Music className="w-4 h-4 text-zinc-500" />
                     )}
 
-                    {/* Hover or Active Play Overlay */}
-                    <div
-                      className={`absolute inset-0 bg-black/40 flex items-center justify-center transition-opacity ${
-                        isCurrent ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                      }`}
-                    >
-                      {isYt ? (
-                        <ExternalLink className="w-4 h-4 text-white" />
-                      ) : isCurrent && isPlaying ? (
-                        <Pause className="w-4 h-4 text-white fill-current" />
-                      ) : (
-                        <Play className="w-4 h-4 text-white fill-current ml-0.5" />
-                      )}
-                    </div>
+                    {/* Active Equalizer Bar Overlay */}
+                    {isCurrent && (
+                      <div className="absolute inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center gap-[2px]">
+                        {isPlaying ? (
+                          <>
+                            <span className="w-[2.5px] bg-white rounded-full animate-eq-1" />
+                            <span className="w-[2.5px] bg-white rounded-full animate-eq-2" />
+                            <span className="w-[2.5px] bg-white rounded-full animate-eq-3" />
+                          </>
+                        ) : (
+                          <Play className="w-3.5 h-3.5 text-white fill-current ml-0.5" />
+                        )}
+                      </div>
+                    )}
+
+                    {/* Bookmark External Glyph */}
+                    {isYtBookmark && !isCurrent && (
+                      <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                        <ExternalLink className="w-3.5 h-3.5 text-white" />
+                      </div>
+                    )}
                   </div>
 
-                  {/* Title & Artist */}
-                  <div className="min-w-0 pr-2">
-                    <div className="flex items-center gap-2">
+                  {/* Metadata & Source Dot */}
+                  <div className="min-w-0 flex-1 pr-2">
+                    <div className="flex items-center gap-1.5">
                       <p
-                        className={`text-sm truncate font-medium ${
+                        className={`text-xs sm:text-sm truncate font-medium ${
                           isCurrent
-                            ? "text-zinc-950 dark:text-zinc-50 font-semibold"
-                            : "text-zinc-800 dark:text-zinc-200"
+                            ? "text-white font-semibold"
+                            : "text-zinc-200"
                         }`}
                       >
                         {song.title}
                       </p>
-                      {isYt && (
-                        <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 dark:bg-red-950/60 text-red-600 dark:text-red-400 flex items-center gap-1">
-                          <YoutubeIcon className="w-3 h-3" />
-                          Bookmark
-                        </span>
+
+                      {/* Subtle dot indicator */}
+                      {(isYtExtracted || isYtBookmark) && (
+                        <span
+                          className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0"
+                          title="YouTube"
+                        />
+                      )}
+                      {isDirect && (
+                        <span
+                          className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"
+                          title="Stream"
+                        />
                       )}
                     </div>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate mt-0.5">
+                    <p className="text-[11px] text-zinc-400 truncate mt-0.5">
                       {song.artist}
                     </p>
                   </div>
                 </div>
 
-                {/* Right: Duration, Date & Action Menu */}
-                <div className="flex items-center gap-3 shrink-0">
-                  {song.duration && !isYt ? (
-                    <span className="hidden sm:inline text-xs font-mono text-zinc-400">
+                {/* Right: Duration + Menu Button */}
+                <div className="flex items-center gap-2 shrink-0">
+                  {song.duration && !isYtBookmark ? (
+                    <span className="text-[11px] font-mono text-zinc-500 tabular-nums">
                       {formatTime(song.duration)}
                     </span>
                   ) : null}
 
-                  {/* More Actions Menu */}
-                  <div className="relative">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveMenuSongId(
-                          activeMenuSongId === song.id ? null : song.id
-                        );
-                        setPlaylistMenuSongId(null);
-                      }}
-                      aria-label="More options"
-                      className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
-                    >
-                      <MoreVertical className="w-4 h-4" />
-                    </button>
-
-                    {activeMenuSongId === song.id && (
-                      <div
-                        onClick={(e) => e.stopPropagation()}
-                        className="absolute right-0 top-full mt-1 w-48 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-xl py-1.5 z-30"
-                      >
-                        {isYt && song.youtube_url && (
-                          <a
-                            href={song.youtube_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/80"
-                          >
-                            <ExternalLink className="w-3.5 h-3.5" />
-                            Open on YouTube
-                          </a>
-                        )}
-
-                        <button
-                          onClick={() => setPlaylistMenuSongId(song.id)}
-                          className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/80"
-                        >
-                          <ListPlus className="w-3.5 h-3.5" />
-                          Add to Playlist...
-                        </button>
-
-                        <button
-                          onClick={() => handleDelete(song.id)}
-                          className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          Delete Song
-                        </button>
-
-                        {/* Submenu for selecting playlist */}
-                        {playlistMenuSongId === song.id && (
-                          <div className="border-t border-zinc-100 dark:border-zinc-800 mt-1 pt-1 max-h-36 overflow-y-auto">
-                            <div className="px-3 py-1 text-[10px] uppercase font-semibold text-zinc-400">
-                              Choose Playlist
-                            </div>
-                            {playlists.length === 0 ? (
-                              <div className="px-3 py-1.5 text-xs text-zinc-400 italic">
-                                No playlists yet
-                              </div>
-                            ) : (
-                              playlists.map((pl) => (
-                                <button
-                                  key={pl.id}
-                                  onClick={() => handleAddToPlaylist(pl.id, song.id)}
-                                  className="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 truncate"
-                                >
-                                  {pl.name}
-                                </button>
-                              ))
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setActiveMenuSong(song);
+                      setIsCreatingPlaylist(false);
+                    }}
+                    aria-label="Track options"
+                    className="w-8 h-8 rounded-full flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/[0.08] active:scale-90 transition-transform cursor-pointer"
+                  >
+                    <MoreHorizontal className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* ================= TRACK ACTION SHEET ================= */}
+      {activeMenuSong && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-end md:items-center justify-center p-0 md:p-4 animate-fade-in">
+          <div
+            className="absolute inset-0 -z-10"
+            onClick={() => setActiveMenuSong(null)}
+          />
+
+          <div className="w-full md:max-w-sm rounded-t-3xl md:rounded-2xl bg-[#09090c] border-t md:border border-white/[0.08] shadow-2xl p-4 pb-[calc(1.25rem+env(safe-area-inset-bottom,0px))] space-y-4">
+            {/* Sheet Handle */}
+            <div className="w-8 h-1 rounded-full bg-white/20 mx-auto md:hidden" />
+
+            {/* Track Info Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-white/[0.06]">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-lg bg-white/[0.05] border border-white/[0.08] overflow-hidden shrink-0 flex items-center justify-center">
+                  {activeMenuSong.artwork_url ? (
+                    <img
+                      src={activeMenuSong.artwork_url}
+                      alt=""
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <Music className="w-4 h-4 text-zinc-500" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-white truncate">
+                    {activeMenuSong.title}
+                  </p>
+                  <p className="text-[11px] text-zinc-400 truncate">
+                    {activeMenuSong.artist}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setActiveMenuSong(null)}
+                className="p-1 text-zinc-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Playlists Toggle Section */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px] font-medium text-zinc-400 px-1">
+                <span>Add to Playlist</span>
+                {!isCreatingPlaylist && (
+                  <button
+                    onClick={() => setIsCreatingPlaylist(true)}
+                    className="flex items-center gap-1 text-[10px] text-zinc-300 hover:text-white"
+                  >
+                    <Plus className="w-3 h-3" />
+                    <span>New</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Inline Create Playlist */}
+              {isCreatingPlaylist && (
+                <div className="flex items-center gap-1.5 p-1 bg-white/[0.04] border border-white/[0.1] rounded-xl">
+                  <input
+                    type="text"
+                    value={newPlaylistName}
+                    onChange={(e) => setNewPlaylistName(e.target.value)}
+                    placeholder="Playlist name"
+                    autoFocus
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleCreateAndAdd();
+                      } else if (e.key === "Escape") {
+                        setIsCreatingPlaylist(false);
+                      }
+                    }}
+                    className="flex-1 px-2.5 py-1 text-xs bg-transparent text-white placeholder:text-zinc-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={handleCreateAndAdd}
+                    className="px-2 py-1 rounded-lg bg-white text-black text-[11px] font-semibold active:scale-95"
+                  >
+                    Add
+                  </button>
+                  <button
+                    onClick={() => setIsCreatingPlaylist(false)}
+                    className="p-1 text-zinc-400 hover:text-white"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Playlists Checkbox List */}
+              <div className="max-h-40 overflow-y-auto no-scrollbar space-y-1">
+                {playlists.map((pl) => {
+                  const isInPlaylist = (
+                    playlistSongsMap[pl.id] || []
+                  ).includes(activeMenuSong.id);
+
+                  return (
+                    <button
+                      key={pl.id}
+                      onClick={() =>
+                        handleTogglePlaylist(pl.id, activeMenuSong.id)
+                      }
+                      className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs bg-white/[0.02] hover:bg-white/[0.05] transition-colors text-left"
+                    >
+                      <span className="text-zinc-300 truncate">{pl.name}</span>
+                      <div
+                        className={`w-4 h-4 rounded-full flex items-center justify-center border transition-all ${
+                          isInPlaylist
+                            ? "bg-white text-black border-white"
+                            : "border-white/20 text-transparent"
+                        }`}
+                      >
+                        <Check className="w-2.5 h-2.5 stroke-[3]" />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* External YouTube Link if present */}
+            {activeMenuSong.youtube_url && (
+              <a
+                href={activeMenuSong.youtube_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-zinc-400 hover:text-white hover:bg-white/[0.04] transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Open on YouTube</span>
+              </a>
+            )}
+
+            {/* Delete Track Action */}
+            <div className="pt-1 border-t border-white/[0.06]">
+              <button
+                onClick={() => handleDelete(activeMenuSong.id)}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs text-rose-400 hover:bg-rose-500/10 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Track</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

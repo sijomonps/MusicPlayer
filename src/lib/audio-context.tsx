@@ -94,7 +94,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     if (!audioRef.current) return;
     const audio = audioRef.current;
 
-    // Direct MP3 or Cloudflare R2 proxy URL
+    // Direct MP3 or Supabase Storage audio URL
     if (!song.audio_url) {
       console.warn("Song does not have a streamable audio URL:", song);
       return;

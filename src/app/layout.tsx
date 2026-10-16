@@ -13,19 +13,20 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Minimal Music Player",
-  description: "Minimal cloud music player with iPhone lock-screen background audio support.",
+  title: "Sijomons Music",
+  description: "Ultra-minimal, personal cloud audio player with background playback.",
+  applicationName: "Sijomons Music",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Minimal",
+    title: "Sijomons Music",
   },
 };
 
 export const viewport: Viewport = {
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#09090b" },
+    { media: "(prefers-color-scheme: dark)", color: "#060608" },
   ],
   width: "device-width",
   initialScale: 1,
@@ -43,7 +44,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
-      <body className="min-h-full flex flex-col bg-white dark:bg-zinc-950 select-none">
+      <body className="min-h-full flex flex-col bg-[#060608] text-zinc-100 select-none">
         {children}
       </body>
     </html>

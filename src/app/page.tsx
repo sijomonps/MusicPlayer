@@ -20,7 +20,7 @@ function MainContent() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
   return (
-    <div className="flex h-screen bg-white dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 overflow-hidden font-sans">
+    <div className="flex h-screen bg-[#060608] text-zinc-100 overflow-hidden font-sans select-none">
       {/* Desktop Sidebar */}
       <Sidebar
         currentTab={currentTab}
@@ -37,8 +37,8 @@ function MainContent() {
         <MobileHeader onOpenAddModal={() => setIsAddModalOpen(true)} />
 
         {/* Scrollable Content Container */}
-        <main className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 pb-36 md:pb-28">
-          <div className="max-w-4xl mx-auto">
+        <main className="flex-1 overflow-y-auto px-4 sm:px-8 py-5 pb-36 md:pb-28 no-scrollbar">
+          <div className="max-w-4xl mx-auto animate-fade-in-up">
             {selectedPlaylist ? (
               <PlaylistDetail
                 playlist={selectedPlaylist}

@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS public.songs (
     album TEXT,
     duration NUMERIC,
     audio_url TEXT NOT NULL,
-    r2_key TEXT,
+    storage_path TEXT,
+    r2_key TEXT, -- Legacy key for backward compatibility
     artwork_url TEXT,
     source_type TEXT NOT NULL DEFAULT 'upload' CHECK (source_type IN ('upload', 'direct_url', 'youtube_bookmark')),
     youtube_url TEXT,
@@ -149,3 +150,18 @@ CREATE POLICY "Users can delete songs from their playlists"
             AND p.user_id = auth.uid()
         )
     );
+
+-- ====================================================================
+-- 10. Supabase Storage Bucket ("songs")
+-- ====================================================================
+-- To create the public audio storage bucket via SQL, run:
+INSERT INTO storage.buckets (id, name, public) 
+VALUES ('songs', 'songs', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Security Architecture:
+-- 1. Marking the bucket public (public = true) allows anonymous GET / streaming.
+-- 2. Do NOT add public INSERT/UPDATE/DELETE policies to storage.objects.
+-- 3. All audio file uploads and deletions are securely executed server-side
+--    via Next.js API routes (/api/upload) using SUPABASE_SERVICE_ROLE_KEY
+--    and authenticated by your personal UPLOAD_SECRET passcode.

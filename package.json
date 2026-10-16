@@ -6,16 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
+    "postinstall": "node node_modules/youtube-dl-exec/scripts/postinstall.js || true"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1152.0",
-    "@aws-sdk/s3-request-presigner": "^3.1152.0",
     "@supabase/supabase-js": "^2.118.0",
     "lucide-react": "^1.57.0",
     "next": "16.4.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "youtube-dl-exec": "^3.1.17"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",

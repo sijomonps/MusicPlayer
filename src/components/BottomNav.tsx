@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Music, ListMusic, PlusCircle } from "lucide-react";
+import { Music, ListMusic, Plus } from "lucide-react";
 
 interface BottomNavProps {
   currentTab: "songs" | "playlists";
@@ -15,40 +15,45 @@ export function BottomNav({
   onOpenAddModal,
 }: BottomNavProps) {
   return (
-    <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-zinc-950/95 backdrop-blur-md border-t border-zinc-200 dark:border-zinc-800 pb-[env(safe-area-inset-bottom)]">
-      <div className="grid grid-cols-3 h-16 items-center px-4">
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#060608]/90 backdrop-blur-2xl border-t border-white/[0.06] pb-[env(safe-area-inset-bottom,0px)]">
+      <div className="grid grid-cols-3 h-14 items-center px-6 max-w-sm mx-auto">
+        {/* Tracks */}
         <button
           onClick={() => onTabChange("songs")}
-          className={`flex flex-col items-center justify-center gap-1 py-1 transition-colors ${
+          className={`flex flex-col items-center justify-center gap-1 py-1 transition-all active:scale-95 duration-150 ${
             currentTab === "songs"
-              ? "text-zinc-950 dark:text-zinc-50 font-medium"
-              : "text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+              ? "text-white"
+              : "text-zinc-500 hover:text-zinc-300"
           }`}
         >
-          <Music className="w-5 h-5" />
-          <span className="text-[11px]">Songs</span>
+          <Music className="w-4 h-4 stroke-[2.2]" />
+          <span className="text-[10px] font-medium tracking-tight">Tracks</span>
         </button>
 
+        {/* Add */}
         <button
           onClick={onOpenAddModal}
-          className="flex flex-col items-center justify-center gap-1 py-1 text-zinc-600 dark:text-zinc-300 active:scale-95 transition-transform"
+          className="flex flex-col items-center justify-center gap-1 py-1 text-zinc-300 hover:text-white transition-all active:scale-90 duration-150"
         >
-          <PlusCircle className="w-6 h-6 stroke-[1.75]" />
-          <span className="text-[11px]">Add Music</span>
+          <div className="w-7 h-7 rounded-full bg-white/[0.08] border border-white/[0.12] flex items-center justify-center text-white">
+            <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+          </div>
+          <span className="text-[10px] font-medium tracking-tight">Add</span>
         </button>
 
+        {/* Playlists */}
         <button
           onClick={() => onTabChange("playlists")}
-          className={`flex flex-col items-center justify-center gap-1 py-1 transition-colors ${
+          className={`flex flex-col items-center justify-center gap-1 py-1 transition-all active:scale-95 duration-150 ${
             currentTab === "playlists"
-              ? "text-zinc-950 dark:text-zinc-50 font-medium"
-              : "text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+              ? "text-white"
+              : "text-zinc-500 hover:text-zinc-300"
           }`}
         >
-          <ListMusic className="w-5 h-5" />
-          <span className="text-[11px]">Playlists</span>
+          <ListMusic className="w-4 h-4 stroke-[2.2]" />
+          <span className="text-[10px] font-medium tracking-tight">Playlists</span>
         </button>
       </div>
-    </div>
+    </nav>
   );
 }

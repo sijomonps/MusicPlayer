@@ -1,4 +1,8 @@
-export type SongSourceType = "upload" | "direct_url" | "youtube_bookmark";
+export type SongSourceType =
+  | "upload"
+  | "direct_url"
+  | "youtube_bookmark"
+  | "youtube_extracted";
 
 export interface Song {
   id: string;
@@ -7,8 +11,9 @@ export interface Song {
   artist: string;
   album?: string;
   duration?: number; // duration in seconds
-  audio_url: string; // direct streaming URL or /api/stream?key=...
-  r2_key?: string;
+  audio_url: string; // direct streaming URL
+  storage_path?: string; // Supabase Storage object path
+  r2_key?: string; // Legacy Cloudflare R2 key for backward compatibility
   artwork_url?: string;
   source_type: SongSourceType;
   youtube_url?: string;
