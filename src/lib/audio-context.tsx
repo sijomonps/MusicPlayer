@@ -89,6 +89,34 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     };
   }, [currentSong, queue, originalQueue, queueIndex, repeat, shuffle, volume, isMuted]);
 
+  // Wipe browser Cache Storage and unregister lingering service workers on mount
+  // to ensure audio files are strictly streamed from cloud and never stored on device
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    if ("caches" in window) {
+      caches
+        .keys()
+        .then((names) => {
+          names.forEach((name) => {
+            caches.delete(name).catch(() => {});
+          });
+        })
+        .catch(() => {});
+    }
+
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker
+        .getRegistrations()
+        .then((registrations) => {
+          registrations.forEach((registration) => {
+            registration.unregister().catch(() => {});
+          });
+        })
+        .catch(() => {});
+    }
+  }, []);
+
   // Execute playback on the persistent audio element
   const loadAndPlay = useCallback(async (song: Song) => {
     if (!audioRef.current) return;
@@ -445,12 +473,12 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         Persistent HTML5 Audio Element:
         - NEVER unmounted
         - playsInline prevents iOS full screen video takeover
-        - preload="auto" for fast buffering
+        - preload="none" ensures audio is strictly streamed and never pre-downloaded to disk
       */}
       <audio
         ref={audioRef}
         playsInline
-        preload="auto"
+        preload="none"
         className="hidden"
         aria-hidden="true"
       />

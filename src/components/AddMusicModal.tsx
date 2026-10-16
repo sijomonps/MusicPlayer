@@ -368,7 +368,7 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
         xhr.open("PUT", initData.signedUrl, true);
 
         const formData = new FormData();
-        formData.append("cacheControl", "3600");
+        formData.append("cacheControl", "0");
         formData.append("", selectedFile);
 
         xhr.upload.onprogress = (event) => {

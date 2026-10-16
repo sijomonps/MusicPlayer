@@ -44,10 +44,7 @@ const SONGS_STORAGE_KEY = STORAGE_KEY_SONGS;
 const PLAYLISTS_STORAGE_KEY = STORAGE_KEY_PLAYLISTS;
 const PLAYLIST_SONGS_STORAGE_KEY = STORAGE_KEY_PLAYLIST_SONGS;
 
-const DEFAULT_PLAYLIST_MAP: Record<string, string[]> = {
-  "playlist-favorites": ["sample-1", "sample-2", "sample-3"],
-  "playlist-focus": ["sample-1", "sample-2"],
-};
+const DEFAULT_PLAYLIST_MAP: Record<string, string[]> = {};
 const SAMPLE_PLAYLIST_SONGS = DEFAULT_PLAYLIST_MAP;
 
 export function LibraryProvider({ children }: { children: React.ReactNode }) {

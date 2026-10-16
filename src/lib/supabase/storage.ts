@@ -278,6 +278,7 @@ export async function uploadAudioBuffer(
     .upload(cleanPath, buffer, {
       contentType,
       upsert: true,
+      cacheControl: "0",
     });
 
   if (error) {

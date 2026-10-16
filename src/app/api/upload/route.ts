@@ -303,6 +303,7 @@ export async function POST(req: NextRequest) {
       .upload(storagePath, buffer, {
         contentType,
         upsert: true,
+        cacheControl: "0",
       });
 
     if (uploadError) {
