@@ -18,6 +18,7 @@ interface LibraryContextType {
   playlistSongsMap: Record<string, string[]>;
   isLoading: boolean;
   isHydrated: boolean;
+  loadError: string | null;
   addSong: (
     song: Omit<Song, "id" | "created_at"> | Song,
     playlistId?: string
@@ -50,8 +51,22 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     Record<string, string[]>
   >({});
   const [isHydrated, setIsHydrated] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Helper to ensure stable UUID format for PostgreSQL compatibility
+  const ensureUuid = (id?: string): string => {
+    if (
+      id &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        id
+      )
+    ) {
+      return id;
+    }
+    return crypto.randomUUID();
+  };
 
   // 1. Core library fetch from Supabase Database
   const fetchLibrary = useCallback(async () => {
@@ -80,15 +95,34 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           .order("position", { ascending: true }),
       ]);
 
-      if (songsRes.error) {
-        console.warn("Could not query songs table:", songsRes.error.message);
+      // Inspect errors from every query
+      const queryErrors = [songsRes.error, playlistsRes.error, plSongsRes.error].filter(
+        Boolean
+      );
+
+      if (queryErrors.length > 0) {
+        const primaryError = queryErrors[0]!;
+        console.error("Supabase query error:", primaryError);
+
+        let userMsg = `Database request failed: ${primaryError.message}`;
+        if (primaryError.code === "42501") {
+          userMsg =
+            "Database permission denied (RLS policy). Please execute the schema migration SQL in your Supabase SQL Editor.";
+        } else if (
+          primaryError.code === "PGRST204" ||
+          primaryError.code === "PGRST202"
+        ) {
+          userMsg = `Database schema mismatch (${primaryError.message}). Please update the schema in Supabase.`;
+        }
+
+        setLoadError(userMsg);
+        // CRITICAL: NEVER overwrite existing valid state with empty arrays on error
+        setIsHydrated(true);
+        return;
       }
-      if (playlistsRes.error) {
-        console.warn("Could not query playlists table:", playlistsRes.error.message);
-      }
-      if (plSongsRes.error) {
-        console.warn("Could not query playlist_songs table:", plSongsRes.error.message);
-      }
+
+      // Success: clear previous errors
+      setLoadError(null);
 
       let fetchedSongs: Song[] = songsRes.data || [];
       let fetchedPlaylists: Playlist[] = playlistsRes.data || [];
@@ -107,6 +141,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           );
 
           if (rawLocalSongs || rawLocalPlaylists || rawLocalPlSongs) {
+            let migrationSuccess = true;
             try {
               const localSongs: Song[] = rawLocalSongs
                 ? JSON.parse(rawLocalSongs)
@@ -142,10 +177,10 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
                   !remotePlaylistNames.has(p.name.toLowerCase().trim())
               );
 
-              // Migrate missing songs
+              // 1. Migrate missing songs
               if (songsToMigrate.length > 0) {
                 const songRows = songsToMigrate.map((s) => ({
-                  id: s.id,
+                  id: ensureUuid(s.id),
                   title: s.title,
                   artist: s.artist,
                   album: s.album || null,
@@ -153,23 +188,25 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
                   audio_url: s.audio_url,
                   artwork_url: s.artwork_url || null,
                   source_type: s.source_type,
-                  storage_path: s.storage_path || null,
-                  r2_key: s.r2_key || null,
+                  r2_key: s.storage_path || s.r2_key || null,
                   youtube_url: s.youtube_url || null,
                   created_at: s.created_at || new Date().toISOString(),
                 }));
                 const { error: songInsErr } = await supabase
                   .from("songs")
                   .upsert(songRows, { onConflict: "id", ignoreDuplicates: true });
-                if (!songInsErr) {
+                if (songInsErr) {
+                  console.error("Migration: songs upsert failed:", songInsErr);
+                  migrationSuccess = false;
+                } else {
                   fetchedSongs = [...songsToMigrate, ...fetchedSongs];
                 }
               }
 
-              // Migrate missing playlists
-              if (playlistsToMigrate.length > 0) {
+              // 2. Migrate missing playlists
+              if (playlistsToMigrate.length > 0 && migrationSuccess) {
                 const plRows = playlistsToMigrate.map((p) => ({
-                  id: p.id,
+                  id: ensureUuid(p.id),
                   name: p.name,
                   description: p.description || null,
                   created_at: p.created_at || new Date().toISOString(),
@@ -178,50 +215,65 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
                 const { error: plInsErr } = await supabase
                   .from("playlists")
                   .upsert(plRows, { onConflict: "id", ignoreDuplicates: true });
-                if (!plInsErr) {
+                if (plInsErr) {
+                  console.error("Migration: playlists upsert failed:", plInsErr);
+                  migrationSuccess = false;
+                } else {
                   fetchedPlaylists = [...playlistsToMigrate, ...fetchedPlaylists];
                 }
               }
 
-              // Migrate missing playlist song associations
-              const existingPlSongPairs = new Set(
-                fetchedPlSongs.map(
-                  (ps) => `${ps.playlist_id}:::${ps.song_id}`
-                )
-              );
-              const plSongsToInsert: Array<{
-                id: string;
-                playlist_id: string;
-                song_id: string;
-                position: number;
-                added_at: string;
-              }> = [];
+              // 3. Migrate missing playlist song associations
+              if (migrationSuccess) {
+                const existingPlSongPairs = new Set(
+                  fetchedPlSongs.map(
+                    (ps) => `${ps.playlist_id}:::${ps.song_id}`
+                  )
+                );
+                const plSongsToInsert: Array<{
+                  id: string;
+                  playlist_id: string;
+                  song_id: string;
+                  position: number;
+                  added_at: string;
+                }> = [];
 
-              for (const [plId, songIds] of Object.entries(localPlSongs)) {
-                songIds.forEach((songId, idx) => {
-                  const key = `${plId}:::${songId}`;
-                  if (!existingPlSongPairs.has(key)) {
-                    plSongsToInsert.push({
-                      id: crypto.randomUUID(),
-                      playlist_id: plId,
-                      song_id: songId,
-                      position: idx,
-                      added_at: new Date().toISOString(),
-                    });
+                for (const [plId, songIds] of Object.entries(localPlSongs)) {
+                  songIds.forEach((songId, idx) => {
+                    const key = `${plId}:::${songId}`;
+                    if (!existingPlSongPairs.has(key)) {
+                      plSongsToInsert.push({
+                        id: crypto.randomUUID(),
+                        playlist_id: plId,
+                        song_id: songId,
+                        position: idx,
+                        added_at: new Date().toISOString(),
+                      });
+                    }
+                  });
+                }
+
+                if (plSongsToInsert.length > 0) {
+                  const { error: psInsErr } = await supabase
+                    .from("playlist_songs")
+                    .insert(plSongsToInsert);
+                  if (psInsErr) {
+                    console.error("Migration: playlist_songs insert failed:", psInsErr);
+                    migrationSuccess = false;
                   }
-                });
+                }
               }
 
-              if (plSongsToInsert.length > 0) {
-                await supabase.from("playlist_songs").insert(plSongsToInsert);
+              // ONLY delete local storage and mark complete if ALL steps succeeded
+              if (migrationSuccess) {
+                localStorage.removeItem(LEGACY_STORAGE_KEY_SONGS);
+                localStorage.removeItem(LEGACY_STORAGE_KEY_PLAYLISTS);
+                localStorage.removeItem(LEGACY_STORAGE_KEY_PLAYLIST_SONGS);
+                localStorage.removeItem("minimal_upload_secret");
+                localStorage.setItem(MIGRATION_DONE_KEY, "true");
+              } else {
+                console.warn("Migration failed, preserving local storage data for retry.");
               }
-
-              // Clean up legacy localStorage storage keys after successful migration
-              localStorage.removeItem(LEGACY_STORAGE_KEY_SONGS);
-              localStorage.removeItem(LEGACY_STORAGE_KEY_PLAYLISTS);
-              localStorage.removeItem(LEGACY_STORAGE_KEY_PLAYLIST_SONGS);
-              localStorage.removeItem("minimal_upload_secret");
-              localStorage.setItem(MIGRATION_DONE_KEY, "true");
             } catch (migErr) {
               console.error(
                 "Migration from localStorage encountered error, retaining backup:",
@@ -231,36 +283,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           } else {
             localStorage.setItem(MIGRATION_DONE_KEY, "true");
           }
-        }
-      }
-
-      // If remote database is completely empty on initial setup, seed sample tracks
-      if (fetchedSongs.length === 0 && fetchedPlaylists.length === 0) {
-        try {
-          const sampleRows = SAMPLE_SONGS.map((s) => ({
-            id: s.id,
-            title: s.title,
-            artist: s.artist,
-            album: s.album || null,
-            duration: s.duration || null,
-            audio_url: s.audio_url,
-            artwork_url: s.artwork_url || null,
-            source_type: s.source_type,
-            created_at: s.created_at || new Date().toISOString(),
-          }));
-          await supabase
-            .from("songs")
-            .upsert(sampleRows, { onConflict: "id", ignoreDuplicates: true });
-          await supabase
-            .from("playlists")
-            .upsert(SAMPLE_PLAYLISTS, {
-              onConflict: "id",
-              ignoreDuplicates: true,
-            });
-          fetchedSongs = SAMPLE_SONGS;
-          fetchedPlaylists = SAMPLE_PLAYLISTS;
-        } catch (seedErr) {
-          console.warn("Could not seed initial sample songs into Supabase:", seedErr);
         }
       }
 
@@ -278,22 +300,34 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         }
       });
 
-      const enrichedPlaylists = fetchedPlaylists.map((p) => ({
+      // Deduplicate records by id
+      const uniquePlaylists = Array.from(
+        new Map(fetchedPlaylists.map((p) => [p.id, p])).values()
+      ).map((p) => ({
         ...p,
         song_count: map[p.id]?.length || 0,
       }));
 
-      setSongs(fetchedSongs);
-      setPlaylists(enrichedPlaylists);
+      const uniqueSongs = Array.from(
+        new Map(fetchedSongs.map((s) => [s.id, s])).values()
+      );
+
+      setSongs(uniqueSongs);
+      setPlaylists(uniquePlaylists);
       setPlaylistSongsMap(map);
     } catch (err) {
       console.error("Failed to fetch library from Supabase:", err);
+      setLoadError(
+        err instanceof Error
+          ? err.message
+          : "Unexpected error fetching library from Supabase."
+      );
     } finally {
       setIsHydrated(true);
     }
   }, []);
 
-  // 2. Debounced fetch for Supabase Realtime updates
+  // 2. Debounced fetch for Supabase Realtime updates and focus events
   const debouncedFetch = useCallback(() => {
     if (fetchTimeoutRef.current) {
       clearTimeout(fetchTimeoutRef.current);
@@ -303,8 +337,10 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     }, 150);
   }, [fetchLibrary]);
 
-  // 3. Mount effect: Wipe browser cache, unregister service workers, and subscribe to Supabase Realtime
+  // 3. Mount effect: Wipe browser cache, subscribe to Realtime, and listen to window visibility/focus
   useEffect(() => {
+    let removeListeners: (() => void) | undefined;
+
     // Zero-cache policy: clear browser Cache Storage and unregister service workers
     if (typeof window !== "undefined") {
       try {
@@ -330,6 +366,21 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           })
           .catch(() => {});
       }
+
+      // Re-fetch when returning to the tab/window from background
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === "visible") {
+          debouncedFetch();
+        }
+      };
+      window.addEventListener("visibilitychange", handleVisibilityChange);
+      window.addEventListener("focus", handleVisibilityChange);
+
+      // Clean up event listeners on unmount
+      removeListeners = () => {
+        window.removeEventListener("visibilitychange", handleVisibilityChange);
+        window.removeEventListener("focus", handleVisibilityChange);
+      };
     }
 
     // Initial fetch
@@ -362,27 +413,39 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
             debouncedFetch();
           }
         )
-        .subscribe();
+        .subscribe((status, err) => {
+          if (status === "CHANNEL_ERROR") {
+            console.warn("Supabase Realtime channel error:", err);
+          }
+        });
 
       return () => {
         client.removeChannel(channel);
         if (fetchTimeoutRef.current) {
           clearTimeout(fetchTimeoutRef.current);
         }
+        if (removeListeners) removeListeners();
       };
     }
+
+    return () => {
+      if (fetchTimeoutRef.current) {
+        clearTimeout(fetchTimeoutRef.current);
+      }
+      if (removeListeners) removeListeners();
+    };
   }, [fetchLibrary, debouncedFetch]);
 
-  // 4. Mutation: Add Song (optimistic update + Supabase insert)
+  // 4. Mutation: Add Song (optimistic update with reliable rollback + Supabase insert)
   const addSong = useCallback(
     async (
       newSongData: Omit<Song, "id" | "created_at"> | Song,
       playlistId?: string
     ): Promise<Song> => {
-      const uniqueId =
-        "id" in newSongData && newSongData.id
-          ? newSongData.id
-          : crypto.randomUUID();
+      const uniqueId = ensureUuid(
+        "id" in newSongData && newSongData.id ? newSongData.id : undefined
+      );
+
       const newSong: Song = {
         ...newSongData,
         id: uniqueId,
@@ -391,6 +454,10 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
             ? newSongData.created_at
             : new Date().toISOString(),
       };
+
+      const previousSongs = songs;
+      const previousMap = playlistSongsMap;
+      const previousPlaylists = playlists;
 
       // Optimistic UI updates
       setSongs((prev) => [newSong, ...prev.filter((s) => s.id !== newSong.id)]);
@@ -413,46 +480,84 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
 
       // Persist to Supabase Database
       if (supabase && isSupabaseConfigured) {
-        try {
-          await supabase.from("songs").upsert({
-            id: newSong.id,
-            title: newSong.title,
-            artist: newSong.artist,
-            album: newSong.album || null,
-            duration: newSong.duration || null,
-            audio_url: newSong.audio_url,
-            artwork_url: newSong.artwork_url || null,
-            source_type: newSong.source_type,
-            storage_path: newSong.storage_path || null,
-            r2_key: newSong.r2_key || null,
-            youtube_url: newSong.youtube_url || null,
-            created_at: newSong.created_at,
-          });
+        const songPayload: Record<string, unknown> = {
+          id: newSong.id,
+          title: newSong.title,
+          artist: newSong.artist,
+          album: newSong.album || null,
+          duration: newSong.duration || null,
+          audio_url: newSong.audio_url,
+          artwork_url: newSong.artwork_url || null,
+          source_type: newSong.source_type,
+          r2_key: newSong.storage_path || newSong.r2_key || null,
+          youtube_url: newSong.youtube_url || null,
+          created_at: newSong.created_at,
+        };
+        if (newSong.storage_path) {
+          songPayload.storage_path = newSong.storage_path;
+        }
 
-          if (playlistId) {
-            const currentIds = playlistSongsMap[playlistId] || [];
-            await supabase.from("playlist_songs").insert({
-              id: crypto.randomUUID(),
-              playlist_id: playlistId,
-              song_id: newSong.id,
-              position: currentIds.length,
-              added_at: new Date().toISOString(),
-            });
+        const { error: songErr } = await supabase.from("songs").upsert(songPayload);
+
+        if (songErr) {
+          // If storage_path column is missing on server, retry without it
+          if (songErr.message.includes("storage_path")) {
+            delete songPayload.storage_path;
+            const retryRes = await supabase.from("songs").upsert(songPayload);
+            if (retryRes.error) {
+              setSongs(previousSongs);
+              if (playlistId) {
+                setPlaylistSongsMap(previousMap);
+                setPlaylists(previousPlaylists);
+              }
+              const errMsg =
+                retryRes.error.code === "42501"
+                  ? "Database permission denied (RLS policy). Please run the schema migration in your Supabase SQL editor."
+                  : `Failed to save track: ${retryRes.error.message}`;
+              throw new Error(errMsg);
+            }
+          } else {
+            // Rollback optimistic state
+            setSongs(previousSongs);
+            if (playlistId) {
+              setPlaylistSongsMap(previousMap);
+              setPlaylists(previousPlaylists);
+            }
+            const errMsg =
+              songErr.code === "42501"
+                ? "Database permission denied (RLS policy). Please run the schema migration in your Supabase SQL editor."
+                : `Failed to save track: ${songErr.message}`;
+            throw new Error(errMsg);
           }
-        } catch (dbErr) {
-          console.error("Failed to sync new song to Supabase:", dbErr);
+        }
+
+        if (playlistId) {
+          const currentIds = playlistSongsMap[playlistId] || [];
+          const { error: psErr } = await supabase.from("playlist_songs").insert({
+            id: crypto.randomUUID(),
+            playlist_id: playlistId,
+            song_id: newSong.id,
+            position: currentIds.length,
+            added_at: new Date().toISOString(),
+          });
+          if (psErr) {
+            console.error("Failed to associate track with playlist:", psErr);
+          }
         }
       }
 
       return newSong;
     },
-    [playlistSongsMap]
+    [songs, playlistSongsMap, playlists]
   );
 
-  // 5. Mutation: Delete Song
+  // 5. Mutation: Delete Song (optimistic update with reliable rollback)
   const deleteSong = useCallback(
     async (id: string) => {
       const songToDelete = songs.find((s) => s.id === id);
+      const previousSongs = songs;
+      const previousMap = playlistSongsMap;
+      const previousPlaylists = playlists;
 
       // Optimistic UI updates
       setSongs((prev) => prev.filter((s) => s.id !== id));
@@ -471,6 +576,23 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           return { ...p, song_count: count };
         })
       );
+
+      // Persist deletion to Supabase
+      if (supabase && isSupabaseConfigured) {
+        await supabase.from("playlist_songs").delete().eq("song_id", id);
+        const { error: delErr } = await supabase
+          .from("songs")
+          .delete()
+          .eq("id", id);
+
+        if (delErr) {
+          // Rollback
+          setSongs(previousSongs);
+          setPlaylistSongsMap(previousMap);
+          setPlaylists(previousPlaylists);
+          throw new Error(`Failed to delete track from database: ${delErr.message}`);
+        }
+      }
 
       // Delete storage file if present
       if (songToDelete) {
@@ -491,97 +613,168 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           }
         }
       }
-
-      // Persist deletion to Supabase
-      if (supabase && isSupabaseConfigured) {
-        try {
-          await supabase.from("playlist_songs").delete().eq("song_id", id);
-          await supabase.from("songs").delete().eq("id", id);
-        } catch (dbErr) {
-          console.error("Failed to delete song from Supabase:", dbErr);
-        }
-      }
     },
-    [songs, playlistSongsMap]
+    [songs, playlistSongsMap, playlists]
   );
 
-  // 6. Mutation: Create Playlist
+  // 6. Mutation: Create Playlist (strictly validated, awaits database, rolls back on error)
   const createPlaylist = useCallback(
     async (name: string, description?: string): Promise<Playlist> => {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        throw new Error("Playlist name cannot be empty.");
+      }
+
       const uniqueId = crypto.randomUUID();
       const now = new Date().toISOString();
       const newPlaylist: Playlist = {
         id: uniqueId,
-        name,
-        description,
+        name: trimmedName,
+        description: description?.trim() || undefined,
         created_at: now,
         updated_at: now,
         song_count: 0,
       };
 
+      if (!supabase || !isSupabaseConfigured) {
+        setPlaylists((prev) => [newPlaylist, ...prev]);
+        setPlaylistSongsMap((prev) => ({ ...prev, [uniqueId]: [] }));
+        return newPlaylist;
+      }
+
       // Optimistic UI update
       setPlaylists((prev) => [newPlaylist, ...prev]);
       setPlaylistSongsMap((prev) => ({ ...prev, [uniqueId]: [] }));
 
-      // Persist to Supabase
-      if (supabase && isSupabaseConfigured) {
-        try {
-          await supabase.from("playlists").insert({
-            id: newPlaylist.id,
-            name: newPlaylist.name,
-            description: newPlaylist.description || null,
-            created_at: newPlaylist.created_at,
-            updated_at: newPlaylist.updated_at,
-          });
-        } catch (dbErr) {
-          console.error("Failed to create playlist in Supabase:", dbErr);
-        }
+      // Persist to Supabase and inspect response
+      const { data, error } = await supabase
+        .from("playlists")
+        .insert({
+          id: uniqueId,
+          name: trimmedName,
+          description: description?.trim() || null,
+          created_at: now,
+          updated_at: now,
+        })
+        .select()
+        .single();
+
+      if (error) {
+        // Rollback state immediately
+        setPlaylists((prev) => prev.filter((p) => p.id !== uniqueId));
+        setPlaylistSongsMap((prev) => {
+          const next = { ...prev };
+          delete next[uniqueId];
+          return next;
+        });
+
+        const errorMsg =
+          error.code === "42501"
+            ? "Database permission denied (RLS policy). Please execute the schema migration SQL in your Supabase SQL Editor."
+            : `Failed to create playlist: ${error.message}`;
+
+        console.error("Supabase playlist creation failed:", error);
+        throw new Error(errorMsg);
       }
 
-      return newPlaylist;
+      // Confirmed database record
+      const confirmedPlaylist: Playlist = {
+        id: data.id,
+        name: data.name,
+        description: data.description || undefined,
+        created_at: data.created_at,
+        updated_at: data.updated_at,
+        song_count: 0,
+      };
+
+      // Ensure confirmed record is in state
+      setPlaylists((prev) => [
+        confirmedPlaylist,
+        ...prev.filter((p) => p.id !== uniqueId && p.id !== data.id),
+      ]);
+
+      return confirmedPlaylist;
     },
     []
   );
 
-  // 7. Mutation: Rename Playlist
-  const renamePlaylist = useCallback(async (id: string, name: string) => {
-    const updatedAt = new Date().toISOString();
-    setPlaylists((prev) =>
-      prev.map((p) =>
-        p.id === id ? { ...p, name, updated_at: updatedAt } : p
-      )
-    );
+  // 7. Mutation: Rename Playlist (strictly awaits database, rolls back on error)
+  const renamePlaylist = useCallback(
+    async (id: string, name: string) => {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        throw new Error("Playlist name cannot be empty.");
+      }
 
-    if (supabase && isSupabaseConfigured) {
-      try {
-        await supabase
+      const previousPlaylists = playlists;
+      const target = playlists.find((p) => p.id === id);
+      if (!target) return;
+
+      const updatedAt = new Date().toISOString();
+
+      // Optimistic update
+      setPlaylists((prev) =>
+        prev.map((p) =>
+          p.id === id ? { ...p, name: trimmedName, updated_at: updatedAt } : p
+        )
+      );
+
+      if (supabase && isSupabaseConfigured) {
+        const { error } = await supabase
           .from("playlists")
-          .update({ name, updated_at: updatedAt })
+          .update({ name: trimmedName, updated_at: updatedAt })
           .eq("id", id);
-      } catch (dbErr) {
-        console.error("Failed to rename playlist in Supabase:", dbErr);
+
+        if (error) {
+          // Rollback
+          setPlaylists(previousPlaylists);
+          const errorMsg =
+            error.code === "42501"
+              ? "Database permission denied (RLS policy). Please execute the schema migration SQL."
+              : `Failed to rename playlist: ${error.message}`;
+          console.error("Supabase playlist rename failed:", error);
+          throw new Error(errorMsg);
+        }
       }
-    }
-  }, []);
+    },
+    [playlists]
+  );
 
-  // 8. Mutation: Delete Playlist
-  const deletePlaylist = useCallback(async (id: string) => {
-    setPlaylists((prev) => prev.filter((p) => p.id !== id));
-    setPlaylistSongsMap((prev) => {
-      const nextMap = { ...prev };
-      delete nextMap[id];
-      return nextMap;
-    });
+  // 8. Mutation: Delete Playlist (strictly awaits database, rolls back on error)
+  const deletePlaylist = useCallback(
+    async (id: string) => {
+      const previousPlaylists = playlists;
+      const previousMap = playlistSongsMap;
 
-    if (supabase && isSupabaseConfigured) {
-      try {
+      // Optimistic update
+      setPlaylists((prev) => prev.filter((p) => p.id !== id));
+      setPlaylistSongsMap((prev) => {
+        const nextMap = { ...prev };
+        delete nextMap[id];
+        return nextMap;
+      });
+
+      if (supabase && isSupabaseConfigured) {
+        // Delete associations first
         await supabase.from("playlist_songs").delete().eq("playlist_id", id);
-        await supabase.from("playlists").delete().eq("id", id);
-      } catch (dbErr) {
-        console.error("Failed to delete playlist from Supabase:", dbErr);
+
+        const { error } = await supabase.from("playlists").delete().eq("id", id);
+
+        if (error) {
+          // Rollback
+          setPlaylists(previousPlaylists);
+          setPlaylistSongsMap(previousMap);
+          const errorMsg =
+            error.code === "42501"
+              ? "Database permission denied (RLS policy). Please execute the schema migration SQL."
+              : `Failed to delete playlist: ${error.message}`;
+          console.error("Supabase playlist delete failed:", error);
+          throw new Error(errorMsg);
+        }
       }
-    }
-  }, []);
+    },
+    [playlists, playlistSongsMap]
+  );
 
   // 9. Query: Get ordered songs for a playlist
   const getPlaylistSongs = useCallback(
@@ -595,12 +788,16 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     [songs, playlistSongsMap]
   );
 
-  // 10. Mutation: Add Song to Playlist
+  // 10. Mutation: Add Song to Playlist (strictly awaits database, rolls back on error)
   const addSongToPlaylist = useCallback(
     async (playlistId: string, songId: string) => {
       const current = playlistSongsMap[playlistId] || [];
       if (current.includes(songId)) return;
 
+      const previousMap = playlistSongsMap;
+      const previousPlaylists = playlists;
+
+      // Optimistic update
       setPlaylistSongsMap((prev) => ({
         ...prev,
         [playlistId]: [...(prev[playlistId] || []), songId],
@@ -615,25 +812,37 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       );
 
       if (supabase && isSupabaseConfigured) {
-        try {
-          await supabase.from("playlist_songs").insert({
-            id: crypto.randomUUID(),
-            playlist_id: playlistId,
-            song_id: songId,
-            position: current.length,
-            added_at: new Date().toISOString(),
-          });
-        } catch (dbErr) {
-          console.error("Failed to add song to playlist in Supabase:", dbErr);
+        const { error } = await supabase.from("playlist_songs").insert({
+          id: crypto.randomUUID(),
+          playlist_id: playlistId,
+          song_id: songId,
+          position: current.length,
+          added_at: new Date().toISOString(),
+        });
+
+        if (error) {
+          // Rollback
+          setPlaylistSongsMap(previousMap);
+          setPlaylists(previousPlaylists);
+          const errorMsg =
+            error.code === "42501"
+              ? "Database permission denied (RLS policy). Please execute the schema migration SQL."
+              : `Failed to add track to playlist: ${error.message}`;
+          console.error("Supabase add track to playlist failed:", error);
+          throw new Error(errorMsg);
         }
       }
     },
-    [playlistSongsMap]
+    [playlistSongsMap, playlists]
   );
 
-  // 11. Mutation: Remove Song from Playlist
+  // 11. Mutation: Remove Song from Playlist (strictly awaits database, rolls back on error)
   const removeSongFromPlaylist = useCallback(
     async (playlistId: string, songId: string) => {
+      const previousMap = playlistSongsMap;
+      const previousPlaylists = playlists;
+
+      // Optimistic update
       setPlaylistSongsMap((prev) => ({
         ...prev,
         [playlistId]: (prev[playlistId] || []).filter((id) => id !== songId),
@@ -648,52 +857,78 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       );
 
       if (supabase && isSupabaseConfigured) {
-        try {
-          await supabase
-            .from("playlist_songs")
-            .delete()
-            .eq("playlist_id", playlistId)
-            .eq("song_id", songId);
-        } catch (dbErr) {
-          console.error("Failed to remove song from playlist in Supabase:", dbErr);
+        const { error } = await supabase
+          .from("playlist_songs")
+          .delete()
+          .eq("playlist_id", playlistId)
+          .eq("song_id", songId);
+
+        if (error) {
+          // Rollback
+          setPlaylistSongsMap(previousMap);
+          setPlaylists(previousPlaylists);
+          const errorMsg =
+            error.code === "42501"
+              ? "Database permission denied (RLS policy). Please execute the schema migration SQL."
+              : `Failed to remove track from playlist: ${error.message}`;
+          console.error("Supabase remove track from playlist failed:", error);
+          throw new Error(errorMsg);
         }
       }
     },
-    []
+    [playlistSongsMap, playlists]
   );
 
-  // 12. Mutation: Reorder Songs in Playlist
+  // 12. Mutation: Reorder Songs in Playlist (atomic delete & re-insert with rollback)
   const reorderPlaylistSongs = useCallback(
     async (playlistId: string, reorderedSongIds: string[]) => {
+      const previousOrder = playlistSongsMap[playlistId] || [];
+
+      // Optimistic update
       setPlaylistSongsMap((prev) => ({
         ...prev,
         [playlistId]: reorderedSongIds,
       }));
 
       if (supabase && isSupabaseConfigured) {
-        try {
-          // Re-insert positions 0..n
-          await supabase
-            .from("playlist_songs")
-            .delete()
-            .eq("playlist_id", playlistId);
+        // Delete previous ordering
+        const { error: delErr } = await supabase
+          .from("playlist_songs")
+          .delete()
+          .eq("playlist_id", playlistId);
 
-          if (reorderedSongIds.length > 0) {
-            const rows = reorderedSongIds.map((songId, index) => ({
-              id: crypto.randomUUID(),
-              playlist_id: playlistId,
-              song_id: songId,
-              position: index,
-              added_at: new Date().toISOString(),
+        if (delErr) {
+          setPlaylistSongsMap((prev) => ({
+            ...prev,
+            [playlistId]: previousOrder,
+          }));
+          throw new Error(`Failed to update playlist order: ${delErr.message}`);
+        }
+
+        if (reorderedSongIds.length > 0) {
+          const rows = reorderedSongIds.map((songId, index) => ({
+            id: crypto.randomUUID(),
+            playlist_id: playlistId,
+            song_id: songId,
+            position: index,
+            added_at: new Date().toISOString(),
+          }));
+
+          const { error: insErr } = await supabase
+            .from("playlist_songs")
+            .insert(rows);
+
+          if (insErr) {
+            setPlaylistSongsMap((prev) => ({
+              ...prev,
+              [playlistId]: previousOrder,
             }));
-            await supabase.from("playlist_songs").insert(rows);
+            throw new Error(`Failed to save reordered tracks: ${insErr.message}`);
           }
-        } catch (dbErr) {
-          console.error("Failed to reorder playlist songs in Supabase:", dbErr);
         }
       }
     },
-    []
+    [playlistSongsMap]
   );
 
   const isLoading = !isHydrated;
@@ -706,6 +941,7 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         playlistSongsMap,
         isLoading,
         isHydrated,
+        loadError,
         addSong,
         deleteSong,
         createPlaylist,

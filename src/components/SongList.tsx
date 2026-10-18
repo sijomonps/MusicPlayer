@@ -11,6 +11,7 @@ import {
   Plus,
   Check,
   X,
+  AlertCircle,
 } from "lucide-react";
 import { Song } from "@/lib/types";
 import { useAudio } from "@/lib/audio-context";
@@ -36,6 +37,8 @@ export function SongList({
     removeSongFromPlaylist,
     createPlaylist,
     deleteSong,
+    loadError,
+    refreshLibrary,
   } = useLibrary();
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -101,6 +104,23 @@ export function SongList({
 
   return (
     <div className="space-y-4">
+      {/* Load Error Banner */}
+      {loadError && (
+        <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-center justify-between gap-3 animate-fade-in">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span className="truncate">{loadError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshLibrary()}
+            className="px-3 py-1 rounded-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-[11px] font-semibold shrink-0 cursor-pointer transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Header & Search */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">

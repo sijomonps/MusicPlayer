@@ -5,9 +5,9 @@ import path from "node:path";
 import youtubedl from "youtube-dl-exec";
 import {
   isSupabaseStorageConfigured,
+  getSupabaseAdminClient,
   getStorageUsage,
   uploadAudioBuffer,
-  MAX_AUDIO_FILE_SIZE,
 } from "@/lib/supabase/storage";
 import { isYouTubeUrl } from "@/lib/link-utils";
 import { checkRateLimit } from "@/lib/security";
@@ -20,110 +20,18 @@ const NO_CACHE_HEADERS = {
   Expires: "0",
 };
 
-/**
- * Builds yt-dlp execution options with cookies and player client arguments to prevent bot detection:
- * 1. Checks for a cookies.txt file in project root or path specified in YOUTUBE_COOKIE_PATH.
- * 2. Alternatively loads cookies from Chrome, Firefox, Edge, or Safari where user is logged in.
- * 3. Enforces player_client fallback to Android & Web to bypass bot verification challenges.
- */
-function getYouTubeDlOptions(extraFlags: Record<string, unknown> = {}): Record<string, unknown> {
-  const options: Record<string, unknown> = {
-    noWarnings: true,
-    preferFreeFormats: true,
-    // Force Android and Web client fallback to prevent YouTube bot challenges
-    extractorArgs: "youtube:player_client=android,web",
-    ...extraFlags,
-  };
-
-  // 1. Fallback to cookies.txt file in project root if it exists
-  const rootCookiePath = path.resolve(process.cwd(), "cookies.txt");
-  const envCookiePath = process.env.YOUTUBE_COOKIE_PATH?.trim();
-
-  if (envCookiePath && fs.existsSync(envCookiePath)) {
-    options.cookies = envCookiePath;
-  } else if (fs.existsSync(rootCookiePath)) {
-    options.cookies = rootCookiePath;
-  } else {
-    // 2. Pass cookies from local browser (Chrome, Firefox, Safari, Edge)
-    const browser = process.env.YOUTUBE_COOKIES_BROWSER?.trim() || "chrome";
-    options.cookiesFromBrowser = browser;
-  }
-
-  return options;
-}
-
-/**
- * Executes youtubedl with automatic cookie fallback:
- * If local browser cookie database is locked or not found, retries without browser cookies.
- */
-async function runYouTubeDl(
-  url: string,
-  flags: Record<string, unknown> = {}
-): Promise<unknown> {
-  const options = getYouTubeDlOptions(flags);
-  try {
-    return await youtubedl(url, options);
-  } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-
-    // If reading browser cookies failed due to browser profile lock or missing browser,
-    // retry once cleanly without cookiesFromBrowser
-    if (
-      options.cookiesFromBrowser &&
-      (errorMsg.includes("cookies-from-browser") ||
-        errorMsg.includes("cookie database") ||
-        errorMsg.includes("Could not copy") ||
-        errorMsg.includes("database is locked") ||
-        errorMsg.includes("Browser not found") ||
-        errorMsg.includes("could not find"))
-    ) {
-      console.warn(
-        "Browser cookie extraction failed, retrying without browser cookies:",
-        errorMsg
-      );
-      const fallbackOptions = { ...options };
-      delete fallbackOptions.cookiesFromBrowser;
-      return await youtubedl(url, fallbackOptions);
-    }
-
-    throw err;
-  }
-}
-
-/**
- * Formats YouTube extractor errors into user-friendly messages.
- */
-function formatYouTubeError(err: unknown): { message: string; status: number } {
-  const rawMsg = err instanceof Error ? err.message : String(err);
-
-  if (
-    rawMsg.includes("Sign in to confirm you're not a bot") ||
-    rawMsg.includes("Sign in to confirm") ||
-    rawMsg.includes("bot verification")
-  ) {
-    return {
-      message:
-        "YouTube is requiring bot verification. Place a cookies.txt file in the project root or sign in via Chrome, or upload the audio file directly.",
-      status: 422,
-    };
-  }
-
-  if (rawMsg.includes("Private video") || rawMsg.includes("Video unavailable")) {
-    return {
-      message: "This YouTube video is unavailable or private.",
-      status: 422,
-    };
-  }
-
-  return {
-    message: `YouTube error: ${rawMsg.split("\n")[0] || "Failed to process video"}`,
-    status: 422,
-  };
-}
+import {
+  isYtDlpAvailable,
+  formatYouTubeError,
+  fetchOEmbedMetadata,
+  checkFileSizeLimit,
+  rollbackUploadedAudio,
+} from "@/lib/youtube-service";
 
 /**
  * GET /api/youtube?url=...
- * Inspects a YouTube video link and returns title, author, duration, and thumbnail preview.
+ * Inspects a YouTube video URL and returns its metadata (title, author, thumbnail).
+ * Fast, serverless-safe, and resilient.
  */
 export async function GET(req: NextRequest) {
   const urlParam = req.nextUrl.searchParams.get("url")?.trim();
@@ -145,23 +53,15 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const meta = (await runYouTubeDl(urlParam, {
-      dumpSingleJson: true,
-    })) as {
-      title?: string;
-      uploader?: string;
-      channel?: string;
-      duration?: number;
-      thumbnail?: string;
-    };
+    const meta = await fetchOEmbedMetadata(urlParam);
 
     return NextResponse.json(
       {
         valid: true,
-        title: meta?.title || "YouTube Video",
-        artist: meta?.uploader || meta?.channel || "YouTube",
-        duration: meta?.duration || 0,
-        thumbnail: meta?.thumbnail,
+        title: meta.title,
+        artist: meta.artist,
+        duration: 0,
+        thumbnail: meta.thumbnail,
       },
       { headers: NO_CACHE_HEADERS }
     );
@@ -173,8 +73,8 @@ export async function GET(req: NextRequest) {
 
 /**
  * POST /api/youtube
- * Extracts audio from a YouTube video and uploads it directly to Supabase Storage.
- * Passcode-free.
+ * Processes authorized video audio extraction, uploads to Supabase Storage,
+ * and creates the corresponding public.songs record on the server.
  *
  * Request body (JSON):
  * - url: string (required) - YouTube video URL
@@ -182,7 +82,7 @@ export async function GET(req: NextRequest) {
  * - artist?: string (optional) - Custom artist title override
  */
 export async function POST(req: NextRequest) {
-  // Rate limiting to prevent abuse
+  // 1. IP Rate Limiting to prevent denial-of-service abuse
   const clientIp =
     req.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
     req.headers.get("x-real-ip")?.trim() ||
@@ -195,7 +95,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 1. Verify Supabase Storage configuration
+  // 2. Verify Supabase Storage configuration
   if (!isSupabaseStorageConfigured) {
     return NextResponse.json(
       {
@@ -210,7 +110,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const { url, title, artist } = body;
 
-    // 2. Validate URL
+    // 3. Validate URL
     const trimmedUrl = typeof url === "string" ? url.trim() : "";
     if (!trimmedUrl || !isYouTubeUrl(trimmedUrl)) {
       return NextResponse.json(
@@ -222,38 +122,27 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Retrieve video metadata to inspect duration and details before extraction
-    let meta: {
-      title?: string;
-      uploader?: string;
-      channel?: string;
-      duration?: number;
-      thumbnail?: string;
-    } = {};
-
+    // 4. Retrieve video metadata via oEmbed
+    let meta: { title: string; artist: string; thumbnail?: string };
     try {
-      meta = (await runYouTubeDl(trimmedUrl, {
-        dumpSingleJson: true,
-      })) as typeof meta;
+      meta = await fetchOEmbedMetadata(trimmedUrl);
     } catch (metaErr: unknown) {
       const { message, status } = formatYouTubeError(metaErr);
       return NextResponse.json({ error: message }, { status, headers: NO_CACHE_HEADERS });
     }
 
-    // Guardrail: limit video duration to 30 minutes (1800 seconds) to avoid timeouts and 50 MB quota exceedance
-    const durationSeconds =
-      typeof meta?.duration === "number" ? meta.duration : 0;
-    if (durationSeconds > 1800) {
+    // 5. Verify runtime downloader availability
+    if (!isYtDlpAvailable()) {
       return NextResponse.json(
         {
           error:
-            "This YouTube video is longer than 30 minutes. To stay within Supabase Free tier storage limits (50 MB) and avoid timeouts, please choose videos under 30 minutes.",
+            "Audio extraction engine is not available in the serverless deployment environment. You can bookmark this YouTube video to play it directly or upload an audio file.",
         },
-        { status: 400, headers: NO_CACHE_HEADERS }
+        { status: 501, headers: NO_CACHE_HEADERS }
       );
     }
 
-    // 4. Check remaining Supabase storage quota
+    // 6. Check remaining Supabase storage quota
     try {
       const usage = await getStorageUsage();
       if (usage.bucketExists && usage.remainingBytes < 5 * 1024 * 1024) {
@@ -266,33 +155,35 @@ export async function POST(req: NextRequest) {
         );
       }
     } catch {
-      // Non-fatal if usage calculation fails, proceed with upload
+      // Non-fatal if usage calculation fails, proceed
     }
 
-    // 5. Extract audio into temporary scratch folder
+    // 7. Extract audio into a temporary scratch directory
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "yt-extract-"));
 
     try {
-      await runYouTubeDl(trimmedUrl, {
-        extractAudio: true,
-        audioFormat: "mp3",
-        audioQuality: "0",
+      // Use best native audio stream to avoid ffmpeg transcoding dependencies where possible
+      await youtubedl(trimmedUrl, {
+        format: "bestaudio[ext=m4a]/bestaudio/best",
         output: path.join(tempDir, "audio.%(ext)s"),
+        noWarnings: true,
+        preferFreeFormats: true,
       });
 
-      // Find the generated audio file in tempDir
+      // Find the generated audio file
       const files = fs.readdirSync(tempDir);
       const audioFileName = files.find(
         (f) =>
-          f.endsWith(".mp3") ||
           f.endsWith(".m4a") ||
+          f.endsWith(".mp3") ||
+          f.endsWith(".webm") ||
           f.endsWith(".opus") ||
-          f.endsWith(".webm")
+          f.endsWith(".aac")
       );
 
       if (!audioFileName) {
         throw new Error(
-          "Audio extraction finished but no audio output file was found."
+          "Audio extraction finished but no supported audio stream file was found."
         );
       }
 
@@ -300,27 +191,30 @@ export async function POST(req: NextRequest) {
       const stats = fs.statSync(filePath);
 
       // Verify file size does not exceed Supabase 50 MB free limit
-      if (stats.size > MAX_AUDIO_FILE_SIZE) {
+      const sizeCheck = checkFileSizeLimit(stats.size);
+      if (!sizeCheck.ok) {
         return NextResponse.json(
-          {
-            error: `Extracted audio is ${(stats.size / 1024 / 1024).toFixed(
-              1
-            )} MB, which exceeds the Supabase Free plan limit of 50 MB per file.`,
-          },
-          { status: 413, headers: NO_CACHE_HEADERS }
+          { error: sizeCheck.error },
+          { status: sizeCheck.status, headers: NO_CACHE_HEADERS }
         );
       }
 
       const fileBuffer = fs.readFileSync(filePath);
+      const mimeType = audioFileName.endsWith(".m4a")
+        ? "audio/mp4"
+        : audioFileName.endsWith(".webm")
+        ? "audio/webm"
+        : "audio/mpeg";
 
-      // 6. Upload to Supabase Storage with cacheControl: "0"
-      const trackId = `yt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const storagePath = `songs/${trackId}.mp3`;
+      // 8. Upload to Supabase Storage with zero cache header
+      const trackId = crypto.randomUUID();
+      const fileExt = path.extname(audioFileName) || ".m4a";
+      const storagePath = `songs/${trackId}${fileExt}`;
 
       const uploadResult = await uploadAudioBuffer(
         storagePath,
         fileBuffer,
-        "audio/mpeg"
+        mimeType
       );
 
       const finalTitle =
@@ -330,9 +224,73 @@ export async function POST(req: NextRequest) {
       const finalArtist =
         typeof artist === "string" && artist.trim()
           ? artist.trim()
-          : meta.uploader || meta.channel || "YouTube";
+          : meta.artist || "YouTube";
       const artwork = meta.thumbnail;
+      const createdAt = new Date().toISOString();
 
+      // 9. Persist public.songs record immediately on server with service role client
+      const adminClient = getSupabaseAdminClient();
+      if (!adminClient) {
+        await rollbackUploadedAudio(storagePath);
+        return NextResponse.json(
+          {
+            error:
+              "Supabase admin service client could not be initialized. Please check SUPABASE_SERVICE_ROLE_KEY.",
+          },
+          { status: 500, headers: NO_CACHE_HEADERS }
+        );
+      }
+      const songRow: Record<string, unknown> = {
+        id: trackId,
+        title: finalTitle,
+        artist: finalArtist,
+        album: "YouTube Audio",
+        duration: 0,
+        audio_url: uploadResult.publicUrl,
+        storage_path: storagePath,
+        r2_key: storagePath,
+        artwork_url: artwork || null,
+        source_type: "youtube_extracted",
+        youtube_url: trimmedUrl,
+        created_at: createdAt,
+      };
+
+      let dbInsertSuccess = false;
+      let dbErrorMsg = "";
+
+      const insertRes = await adminClient.from("songs").insert(songRow);
+
+      if (insertRes.error) {
+        // If storage_path column is missing in schema, retry without it
+        if (insertRes.error.message.includes("storage_path")) {
+          delete songRow.storage_path;
+          const retryRes = await adminClient.from("songs").insert(songRow);
+          if (retryRes.error) {
+            dbErrorMsg = retryRes.error.message;
+          } else {
+            dbInsertSuccess = true;
+          }
+        } else {
+          dbErrorMsg = insertRes.error.message;
+        }
+      } else {
+        dbInsertSuccess = true;
+      }
+
+      // If database insertion failed, clean up uploaded storage object to prevent orphans
+      if (!dbInsertSuccess) {
+        console.error("Database song insertion failed after storage upload:", dbErrorMsg);
+        await rollbackUploadedAudio(storagePath);
+
+        return NextResponse.json(
+          {
+            error: `Failed to save track record to database: ${dbErrorMsg}. Storage file was cleaned up.`,
+          },
+          { status: 500, headers: NO_CACHE_HEADERS }
+        );
+      }
+
+      // 10. Return confirmed persisted song
       return NextResponse.json(
         {
           success: true,
@@ -344,17 +302,16 @@ export async function POST(req: NextRequest) {
             audio_url: uploadResult.publicUrl,
             storage_path: storagePath,
             artwork_url: artwork,
-            duration: durationSeconds,
+            duration: 0,
             source_type: "youtube_extracted",
             youtube_url: trimmedUrl,
-            file_size: stats.size,
-            created_at: new Date().toISOString(),
+            created_at: createdAt,
           },
         },
         { headers: NO_CACHE_HEADERS }
       );
     } finally {
-      // 7. Always clean up temporary directory and files
+      // 11. Always clean up temporary directory and files
       try {
         fs.rmSync(tempDir, { recursive: true, force: true });
       } catch (cleanupErr) {
