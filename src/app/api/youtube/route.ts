@@ -66,8 +66,11 @@ export async function GET(req: NextRequest) {
       { headers: NO_CACHE_HEADERS }
     );
   } catch (err: unknown) {
-    const { message, status } = formatYouTubeError(err);
-    return NextResponse.json({ error: message }, { status, headers: NO_CACHE_HEADERS });
+    const errorDetails = formatYouTubeError(err);
+    return NextResponse.json(
+      { error: errorDetails.message, canBookmark: errorDetails.canBookmark },
+      { status: errorDetails.status, headers: NO_CACHE_HEADERS }
+    );
   }
 }
 
@@ -127,8 +130,11 @@ export async function POST(req: NextRequest) {
     try {
       meta = await fetchOEmbedMetadata(trimmedUrl);
     } catch (metaErr: unknown) {
-      const { message, status } = formatYouTubeError(metaErr);
-      return NextResponse.json({ error: message }, { status, headers: NO_CACHE_HEADERS });
+      const errorDetails = formatYouTubeError(metaErr);
+      return NextResponse.json(
+        { error: errorDetails.message, canBookmark: errorDetails.canBookmark },
+        { status: errorDetails.status, headers: NO_CACHE_HEADERS }
+      );
     }
 
     // 5. Verify runtime downloader availability
@@ -167,7 +173,9 @@ export async function POST(req: NextRequest) {
         format: "bestaudio[ext=m4a]/bestaudio/best",
         output: path.join(tempDir, "audio.%(ext)s"),
         noWarnings: true,
+        noPlaylist: true,
         preferFreeFormats: true,
+        jsRuntimes: `node:${process.execPath}`,
       });
 
       // Find the generated audio file
@@ -319,8 +327,26 @@ export async function POST(req: NextRequest) {
       }
     }
   } catch (err: unknown) {
-    console.error("YouTube audio extraction error:", err);
-    const { message, status } = formatYouTubeError(err);
-    return NextResponse.json({ error: message }, { status, headers: NO_CACHE_HEADERS });
+    const errorDetails = formatYouTubeError(err);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const errObj = err as any;
+
+    console.error("YouTube audio extraction diagnostics:", {
+      status: errorDetails.status,
+      error: errorDetails.message,
+      canBookmark: errorDetails.canBookmark,
+      exitCode: errObj?.exitCode,
+      stderr: errObj?.stderr ? String(errObj.stderr).slice(0, 1000) : undefined,
+      rawError: errObj?.message ? String(errObj.message).slice(0, 500) : String(err),
+    });
+
+    return NextResponse.json(
+      {
+        error: errorDetails.message,
+        status: errorDetails.status,
+        canBookmark: errorDetails.canBookmark,
+      },
+      { status: errorDetails.status, headers: NO_CACHE_HEADERS }
+    );
   }
 }

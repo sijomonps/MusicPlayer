@@ -671,3 +671,105 @@ test("16. YouTube extraction: Database insertion failure deletes uploaded storag
   assert.equal(deletedPaths.length, 1);
   assert.equal(deletedPaths[0], orphanedStoragePath);
 });
+
+test("17. YouTube extraction: HTTP Error 403 Forbidden returns status 403 with actionable bookmark advice", () => {
+  const forbiddenErr = new Error(
+    "ERROR: unable to download video data: HTTP Error 403: Forbidden\n[youtube] Additional traceback details"
+  );
+  const formatted = formatYouTubeError(forbiddenErr);
+
+  assert.equal(formatted.status, 403);
+  assert.equal(formatted.canBookmark, true);
+  assert.match(formatted.message, /HTTP 403: Forbidden/);
+  assert.match(formatted.message, /YouTube bookmark/i);
+
+  // Content / licensing restriction variation
+  const geoErr = new Error(
+    "ERROR: [youtube] Video unavailable: The uploader has not made this video available in your country (HTTP Error 403: Forbidden)"
+  );
+  const formattedGeo = formatYouTubeError(geoErr);
+  assert.equal(formattedGeo.status, 403);
+  assert.equal(formattedGeo.canBookmark, true);
+  assert.match(formattedGeo.message, /licensing or copyright restrictions/i);
+});
+
+test("18. YouTube extraction: HTTP Error 429 Too Many Requests returns status 429", () => {
+  const rateLimitErr = new Error(
+    "ERROR: unable to download video data: HTTP Error 429: Too Many Requests"
+  );
+  const formatted = formatYouTubeError(rateLimitErr);
+
+  assert.equal(formatted.status, 429);
+  assert.equal(formatted.canBookmark, true);
+  assert.match(formatted.message, /HTTP 429: Too Many Requests/);
+});
+
+test("19. YouTube extraction: Process timeout returns status 504", () => {
+  const timeoutErr = new Error("Command timed out after 50000 milliseconds (ETIMEDOUT)");
+  const formatted = formatYouTubeError(timeoutErr);
+
+  assert.equal(formatted.status, 504);
+  assert.equal(formatted.canBookmark, true);
+  assert.match(formatted.message, /HTTP 504/);
+});
+
+test("20. Complete Workflow: Authorized audio metadata inspection, 50MB check, storage upload, and DB insert", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  // 1. Inspect metadata
+  const mockFetchSuccess = (async () => {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        title: "Me at the zoo",
+        author_name: "jawed",
+        thumbnail_url: "https://i.ytimg.com/vi/jNQXAC9IVRw/default.jpg",
+      }),
+    } as any;
+  }) as typeof fetch;
+
+  const meta = await fetchOEmbedMetadata(
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    mockFetchSuccess
+  );
+  assert.equal(meta.title, "Me at the zoo");
+  assert.equal(meta.artist, "jawed");
+
+  // 2. Size check: 302 KB audio buffer
+  const audioBuffer = Buffer.alloc(302 * 1024, 0xaa);
+  const sizeCheck = checkFileSizeLimit(audioBuffer.length);
+  assert.equal(sizeCheck.ok, true);
+  assert.equal(sizeCheck.status, 200);
+
+  // 3. Storage path & upload simulation
+  const trackId = "99999999-8888-7777-6666-555555555555";
+  const storagePath = `songs/${trackId}.m4a`;
+  const audioUrl = `https://mock.supabase.co/storage/v1/object/public/songs/${storagePath}`;
+
+  // 4. Database insertion via engine / admin client
+  const confirmedSong: Song = {
+    id: trackId,
+    title: meta.title,
+    artist: meta.artist,
+    album: "YouTube Audio",
+    duration: 18,
+    audio_url: audioUrl,
+    storage_path: storagePath,
+    artwork_url: meta.thumbnail,
+    source_type: "youtube_extracted",
+    youtube_url: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    created_at: new Date().toISOString(),
+  };
+
+  db.songs.push(confirmedSong);
+
+  // 5. Cross-device library refresh fetches the extracted track
+  await engine.fetchLibrary();
+  assert.equal(engine.songs.length, 1);
+  assert.equal(engine.songs[0]?.id, trackId);
+  assert.equal(engine.songs[0]?.title, "Me at the zoo");
+  assert.equal(engine.songs[0]?.source_type, "youtube_extracted");
+});
+

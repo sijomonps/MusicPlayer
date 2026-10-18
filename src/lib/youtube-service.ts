@@ -21,35 +21,47 @@ export function isYtDlpAvailable(customBinPath?: string): boolean {
   return false;
 }
 
+export interface YouTubeErrorInfo {
+  message: string;
+  status: number;
+  canBookmark: boolean;
+}
+
 /**
- * Format YouTube extractor errors into user-friendly, actionable messages.
+ * Format YouTube extractor errors into user-friendly, actionable messages
+ * with accurate HTTP status codes and bookmark capability indicators.
  */
-export function formatYouTubeError(err: unknown): { message: string; status: number } {
+export function formatYouTubeError(err: unknown): YouTubeErrorInfo {
   const rawMsg = err instanceof Error ? err.message : String(err);
   const lowerMsg = rawMsg.toLowerCase();
 
+  // 1. YouTube Bot verification / challenge (422)
   if (
     lowerMsg.includes("sign in to confirm") ||
     lowerMsg.includes("bot verification")
   ) {
     return {
       message:
-        "YouTube blocked this automated server request with a bot verification challenge. To protect your access, please bookmark the track to open directly, or upload the audio file.",
+        "YouTube blocked this automated server request with a bot verification challenge (HTTP 422). To protect your access, please bookmark the track to open directly, or upload the audio file.",
       status: 422,
+      canBookmark: true,
     };
   }
 
+  // 2. Missing ffmpeg / ffprobe dependency (501)
   if (
     lowerMsg.includes("ffprobe and ffmpeg not found") ||
     lowerMsg.includes("ffmpeg not found")
   ) {
     return {
       message:
-        "Audio conversion dependency (ffmpeg) is not installed in the server environment. Raw audio streams can be bookmarked or direct audio files can be uploaded.",
+        "Audio conversion dependency (ffmpeg) is not installed in the server environment (HTTP 501). Raw audio streams can be bookmarked or direct audio files can be uploaded.",
       status: 501,
+      canBookmark: true,
     };
   }
 
+  // 3. Missing downloader executable (yt-dlp) (501)
   if (
     lowerMsg.includes("enoent") ||
     lowerMsg.includes("spawn") ||
@@ -58,11 +70,71 @@ export function formatYouTubeError(err: unknown): { message: string; status: num
   ) {
     return {
       message:
-        "Audio extraction engine is not available in the current serverless runtime environment. Please save as a YouTube bookmark or upload your audio file directly.",
+        "Audio extraction engine is not available in the current serverless runtime environment (HTTP 501). Please save as a YouTube bookmark or upload your audio file directly.",
       status: 501,
+      canBookmark: true,
     };
   }
 
+  // 4. Timeouts (504)
+  if (
+    lowerMsg.includes("timed out") ||
+    lowerMsg.includes("timeout") ||
+    lowerMsg.includes("etimedout")
+  ) {
+    return {
+      message:
+        "Audio extraction timed out after 50 seconds (HTTP 504). The video file may be too large or the connection timed out. Please save as a YouTube bookmark or upload your audio file directly.",
+      status: 504,
+      canBookmark: true,
+    };
+  }
+
+  // 5. HTTP 403 Forbidden / Access Denial / Cloud Datacenter Restriction (403)
+  if (
+    lowerMsg.includes("http error 403") ||
+    lowerMsg.includes("403: forbidden") ||
+    lowerMsg.includes("403 forbidden")
+  ) {
+    if (
+      lowerMsg.includes("copyright") ||
+      lowerMsg.includes("in your country") ||
+      lowerMsg.includes("uploader has not made") ||
+      lowerMsg.includes("geo restricted") ||
+      lowerMsg.includes("licens") ||
+      lowerMsg.includes("premium")
+    ) {
+      return {
+        message:
+          "YouTube access restricted (HTTP 403: Forbidden). This video has licensing or copyright restrictions preventing automated extraction. Please save as a YouTube bookmark to play the original track directly.",
+        status: 403,
+        canBookmark: true,
+      };
+    }
+
+    return {
+      message:
+        "YouTube denied media stream access (HTTP 403: Forbidden). YouTube restricts direct audio extraction from cloud servers for this video. You can save this track as a YouTube bookmark to play it directly.",
+      status: 403,
+      canBookmark: true,
+    };
+  }
+
+  // 6. Rate limits / 429
+  if (
+    lowerMsg.includes("http error 429") ||
+    lowerMsg.includes("429: too many requests") ||
+    lowerMsg.includes("too many requests")
+  ) {
+    return {
+      message:
+        "YouTube rate limit reached (HTTP 429: Too Many Requests). YouTube has temporarily throttled server requests. Please wait a few minutes or save as a YouTube bookmark.",
+      status: 429,
+      canBookmark: true,
+    };
+  }
+
+  // 7. Video unavailable / private / deleted / 404 (404)
   if (
     lowerMsg.includes("private video") ||
     lowerMsg.includes("video unavailable") ||
@@ -72,14 +144,30 @@ export function formatYouTubeError(err: unknown): { message: string; status: num
     lowerMsg.includes("404")
   ) {
     return {
-      message: "This YouTube video is unavailable, private, or does not exist.",
+      message: "This YouTube video is unavailable, private, or does not exist (HTTP 404).",
       status: 404,
+      canBookmark: false,
     };
   }
 
+  // 8. Fallback: Clean up raw message and do not truncate abruptly
+  const lines = rawMsg.split("\n").map((l) => l.trim()).filter(Boolean);
+  const cleanLine =
+    lines.find(
+      (l) =>
+        !l.startsWith("Traceback") &&
+        !l.startsWith("File ") &&
+        !l.includes("During handling of the above exception")
+    ) || rawMsg;
+
+  const cleanMessage = cleanLine
+    .replace(/^ERROR:\s*(\[youtube\]\s*)?/i, "")
+    .trim();
+
   return {
-    message: `YouTube error: ${rawMsg.split("\n")[0] || "Failed to process video"}`,
+    message: `YouTube error: ${cleanMessage || "Failed to process video"}. Please save as a YouTube bookmark to play directly.`,
     status: 422,
+    canBookmark: true,
   };
 }
 

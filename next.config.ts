@@ -6,6 +6,9 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   serverExternalPackages: ["youtube-dl-exec"],
+  outputFileTracingIncludes: {
+    "/api/**/*": ["./node_modules/youtube-dl-exec/bin/**/*"],
+  },
   turbopack: {
     rules: {
       "*.css": {

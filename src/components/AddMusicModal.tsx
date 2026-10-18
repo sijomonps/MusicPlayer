@@ -211,13 +211,10 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
             }),
           });
 
-          const data = await res.json();
+          const data = await res.json().catch(() => ({}));
 
           if (!res.ok) {
-            if (res.status === 429) {
-              throw new Error("Rate limited. Wait 15m");
-            }
-            throw new Error(data.error || "Extraction failed");
+            throw new Error(data.error || `Extraction failed (${res.status})`);
           }
 
           await addSong(data.song, selectedPlaylistId || undefined);
@@ -439,9 +436,21 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
 
         {/* Status Alerts */}
         {errorMessage && (
-          <div className="mb-3 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center gap-2">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-            <span className="font-medium truncate">{errorMessage}</span>
+          <div className="mb-3 p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs space-y-2.5">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <span className="font-medium leading-relaxed break-words">{errorMessage}</span>
+            </div>
+            {detectedType === "youtube" && !isSubmitting && (
+              <button
+                type="button"
+                onClick={(e) => handleLinkSubmit(e, true)}
+                className="w-full py-1.5 px-3 rounded-lg bg-white/10 hover:bg-white/15 active:scale-95 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+              >
+                <YoutubeIcon className="w-3.5 h-3.5 text-red-400" />
+                <span>Save as YouTube Bookmark instead</span>
+              </button>
+            )}
           </div>
         )}
 
