@@ -7,7 +7,14 @@ const nextConfig: NextConfig = {
   partialPrefetching: true,
   serverExternalPackages: ["youtube-dl-exec"],
   outputFileTracingIncludes: {
-    "/api/**/*": ["./node_modules/youtube-dl-exec/bin/**/*"],
+    "/api/**/*": [
+      "./bin/**/*",
+      "./node_modules/youtube-dl-exec/bin/**/*",
+    ],
+    "/api/youtube": [
+      "./bin/**/*",
+      "./node_modules/youtube-dl-exec/bin/**/*",
+    ],
   },
   turbopack: {
     rules: {

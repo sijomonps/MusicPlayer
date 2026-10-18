@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS public.songs (
     artwork_url TEXT,
     source_type TEXT NOT NULL DEFAULT 'upload',
     youtube_url TEXT,
+    youtube_video_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -69,6 +70,14 @@ BEGIN
     ALTER TABLE public.songs ADD COLUMN youtube_url TEXT;
   END IF;
 
+  -- Add youtube_video_id to songs if missing
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns 
+    WHERE table_schema = 'public' AND table_name = 'songs' AND column_name = 'youtube_video_id'
+  ) THEN
+    ALTER TABLE public.songs ADD COLUMN youtube_video_id TEXT;
+  END IF;
+
   -- Safely alter columns from UUID to TEXT if table was previously created with UUID primary keys
   IF EXISTS (
     SELECT 1 FROM information_schema.columns 
@@ -99,6 +108,7 @@ END $$;
 
 -- 5. Indexes for fast queries and reordering
 CREATE INDEX IF NOT EXISTS idx_songs_created_at ON public.songs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_songs_youtube_video_id ON public.songs(youtube_video_id);
 CREATE INDEX IF NOT EXISTS idx_playlists_created_at ON public.playlists(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_playlist_songs_playlist_id ON public.playlist_songs(playlist_id);
 CREATE INDEX IF NOT EXISTS idx_playlist_songs_position ON public.playlist_songs(playlist_id, position ASC);

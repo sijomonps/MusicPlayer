@@ -17,7 +17,50 @@ export interface Song {
   artwork_url?: string;
   source_type: SongSourceType;
   youtube_url?: string;
+  youtube_video_id?: string;
   created_at: string;
+}
+
+export interface YouTubePlaylistItem {
+  id: string; // Canonical 11-char video ID
+  title: string;
+  artist: string;
+  duration?: number;
+  thumbnail?: string;
+  position: number;
+  url: string;
+  isUnavailable?: boolean;
+}
+
+export interface YouTubePlaylistInspection {
+  valid: boolean;
+  type: "playlist";
+  id: string;
+  title: string;
+  channel?: string;
+  thumbnail?: string;
+  itemCount: number;
+  entries: YouTubePlaylistItem[];
+}
+
+export type ImportTrackStatus =
+  | "waiting"
+  | "processing"
+  | "added"
+  | "already_in_playlist"
+  | "skipped"
+  | "failed"
+  | "bookmarked";
+
+export interface ImportTrackProgress {
+  id: string; // YouTube video ID
+  title: string;
+  artist: string;
+  thumbnail?: string;
+  url: string;
+  status: ImportTrackStatus;
+  error?: string;
+  songId?: string;
 }
 
 export interface Playlist {

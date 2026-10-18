@@ -11,6 +11,7 @@ import React, {
 import { Song, Playlist } from "./types";
 import { SAMPLE_SONGS, SAMPLE_PLAYLISTS } from "./sample-data";
 import { supabase, isSupabaseConfigured } from "./supabase/client";
+import { extractYouTubeVideoId } from "./link-utils";
 
 interface LibraryContextType {
   songs: Song[];
@@ -446,9 +447,14 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
         "id" in newSongData && newSongData.id ? newSongData.id : undefined
       );
 
+      const videoId =
+        ("youtube_video_id" in newSongData && newSongData.youtube_video_id) ||
+        (newSongData.youtube_url ? extractYouTubeVideoId(newSongData.youtube_url) : undefined);
+
       const newSong: Song = {
         ...newSongData,
         id: uniqueId,
+        youtube_video_id: videoId || undefined,
         created_at:
           "created_at" in newSongData && newSongData.created_at
             ? newSongData.created_at
@@ -491,32 +497,43 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
           source_type: newSong.source_type,
           r2_key: newSong.storage_path || newSong.r2_key || null,
           youtube_url: newSong.youtube_url || null,
+          youtube_video_id: videoId || null,
           created_at: newSong.created_at,
         };
         if (newSong.storage_path) {
           songPayload.storage_path = newSong.storage_path;
         }
 
-        const { error: songErr } = await supabase.from("songs").upsert(songPayload);
+        let { error: songErr } = await supabase.from("songs").upsert(songPayload);
 
         if (songErr) {
-          // If storage_path column is missing on server, retry without it
-          if (songErr.message.includes("storage_path")) {
+          // If storage_path or youtube_video_id columns are missing on server, retry without them
+          let needsRetry = false;
+          if (songErr.message.includes("storage_path") && "storage_path" in songPayload) {
             delete songPayload.storage_path;
+            needsRetry = true;
+          }
+          if (songErr.message.includes("youtube_video_id") && "youtube_video_id" in songPayload) {
+            delete songPayload.youtube_video_id;
+            needsRetry = true;
+          }
+
+          if (needsRetry) {
             const retryRes = await supabase.from("songs").upsert(songPayload);
             if (retryRes.error) {
-              setSongs(previousSongs);
-              if (playlistId) {
-                setPlaylistSongsMap(previousMap);
-                setPlaylists(previousPlaylists);
+              if (retryRes.error.message.includes("youtube_video_id") && "youtube_video_id" in songPayload) {
+                delete songPayload.youtube_video_id;
+                const secondRetry = await supabase.from("songs").upsert(songPayload);
+                songErr = secondRetry.error;
+              } else {
+                songErr = retryRes.error;
               }
-              const errMsg =
-                retryRes.error.code === "42501"
-                  ? "Database permission denied (RLS policy). Please run the schema migration in your Supabase SQL editor."
-                  : `Failed to save track: ${retryRes.error.message}`;
-              throw new Error(errMsg);
+            } else {
+              songErr = null;
             }
-          } else {
+          }
+
+          if (songErr) {
             // Rollback optimistic state
             setSongs(previousSongs);
             if (playlistId) {

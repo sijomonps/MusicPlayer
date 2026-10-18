@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node --experimental-strip-types --test tests/**/*.test.ts",
-    "postinstall": "node node_modules/youtube-dl-exec/scripts/postinstall.js || true"
+    "postinstall": "node scripts/ensure-ytdlp.mjs",
+    "prebuild": "node scripts/ensure-ytdlp.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",

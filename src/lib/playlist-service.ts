@@ -1,4 +1,14 @@
-import type { Song, Playlist } from "./types.ts";
+import type {
+  Song,
+  Playlist,
+  YouTubePlaylistItem,
+  ImportTrackProgress,
+} from "./types.ts";
+import { extractYouTubeVideoId } from "./link-utils.ts";
+import {
+  findExistingSongForYouTubeId,
+  isSongInPlaylist,
+} from "./youtube-service.ts";
 
 export const LEGACY_STORAGE_KEY_SONGS = "minimal_player_songs_v2";
 export const LEGACY_STORAGE_KEY_PLAYLISTS = "minimal_player_playlists_v2";
@@ -490,5 +500,236 @@ export class PlaylistSyncEngine {
         }
       }
     }
+  }
+
+  /**
+   * Add song: optimistic update with database persistence and rollback on failure.
+   */
+  async addSong(
+    newSongData: Omit<Song, "id" | "created_at"> | Song,
+    playlistId?: string
+  ): Promise<Song> {
+    const uniqueId = ensureUuid(
+      "id" in newSongData && newSongData.id ? newSongData.id : undefined
+    );
+
+    const videoId =
+      ("youtube_video_id" in newSongData && newSongData.youtube_video_id) ||
+      (newSongData.youtube_url ? extractYouTubeVideoId(newSongData.youtube_url) : undefined);
+
+    const newSong: Song = {
+      ...newSongData,
+      id: uniqueId,
+      youtube_video_id: videoId || undefined,
+      created_at:
+        "created_at" in newSongData && newSongData.created_at
+          ? newSongData.created_at
+          : new Date().toISOString(),
+    };
+
+    const previousSongs = [...this.songs];
+    const previousMap = { ...this.playlistSongsMap };
+    const previousPlaylists = [...this.playlists];
+
+    this.songs = [newSong, ...this.songs.filter((s) => s.id !== newSong.id)];
+
+    if (playlistId) {
+      const current = this.playlistSongsMap[playlistId] || [];
+      if (!current.includes(newSong.id)) {
+        this.playlistSongsMap = {
+          ...this.playlistSongsMap,
+          [playlistId]: [...current, newSong.id],
+        };
+        this.playlists = this.playlists.map((p) =>
+          p.id === playlistId ? { ...p, song_count: (p.song_count || 0) + 1 } : p
+        );
+      }
+    }
+
+    if (this.client) {
+      const songPayload: Record<string, unknown> = {
+        id: newSong.id,
+        title: newSong.title,
+        artist: newSong.artist,
+        album: newSong.album || null,
+        duration: newSong.duration || null,
+        audio_url: newSong.audio_url,
+        artwork_url: newSong.artwork_url || null,
+        source_type: newSong.source_type,
+        r2_key: newSong.storage_path || newSong.r2_key || null,
+        youtube_url: newSong.youtube_url || null,
+        youtube_video_id: videoId || null,
+        created_at: newSong.created_at,
+      };
+      if (newSong.storage_path) {
+        songPayload.storage_path = newSong.storage_path;
+      }
+
+      const { error: songErr } = await this.client.from("songs").upsert(songPayload);
+
+      if (songErr) {
+        this.songs = previousSongs;
+        if (playlistId) {
+          this.playlistSongsMap = previousMap;
+          this.playlists = previousPlaylists;
+        }
+        throw new Error(`Failed to save song: ${songErr.message}`);
+      }
+
+      if (playlistId) {
+        const currentIds = previousMap[playlistId] || [];
+        const { error: psErr } = await this.client.from("playlist_songs").insert({
+          id: crypto.randomUUID(),
+          playlist_id: playlistId,
+          song_id: newSong.id,
+          position: currentIds.length,
+          added_at: new Date().toISOString(),
+        });
+        if (psErr) {
+          this.songs = previousSongs;
+          this.playlistSongsMap = previousMap;
+          this.playlists = previousPlaylists;
+          throw new Error(`Failed to associate song with playlist: ${psErr.message}`);
+        }
+      }
+    }
+
+    return newSong;
+  }
+
+  /**
+   * Imports YouTube playlist items into an existing website playlist.
+   * Enforces:
+   * - Sequential execution
+   * - Destination playlist must exist (does NOT create playlist automatically)
+   * - Target playlist deduplication (skips if already in playlist)
+   * - Library deduplication (reuses existing song record if already extracted)
+   * - Relative order preservation (appends after existing playlist songs)
+   * - Partial failure resilience (continues with next track on error)
+   * - Cancellation support
+   */
+  async importPlaylistTracks(
+    playlistId: string,
+    items: YouTubePlaylistItem[],
+    extractorFn: (item: YouTubePlaylistItem) => Promise<Song>,
+    options?: {
+      onProgress?: (progress: ImportTrackProgress) => void;
+      shouldCancel?: () => boolean;
+    }
+  ): Promise<{
+    completed: number;
+    skipped: number;
+    failed: number;
+    results: ImportTrackProgress[];
+  }> {
+    const targetPlaylist = this.playlists.find((p) => p.id === playlistId);
+    if (!targetPlaylist) {
+      throw new Error(`Destination playlist with ID "${playlistId}" does not exist.`);
+    }
+
+    const results: ImportTrackProgress[] = [];
+    let completed = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const item of items) {
+      if (options?.shouldCancel?.()) {
+        break;
+      }
+
+      // Check if unavailable
+      if (item.isUnavailable) {
+        const prog: ImportTrackProgress = {
+          id: item.id,
+          title: item.title,
+          artist: item.artist,
+          url: item.url,
+          thumbnail: item.thumbnail,
+          status: "skipped",
+          error: "Track unavailable on YouTube",
+        };
+        results.push(prog);
+        options?.onProgress?.(prog);
+        skipped++;
+        continue;
+      }
+
+      // 1. Check if already in destination playlist
+      const currentSongIds = this.playlistSongsMap[playlistId] || [];
+      const alreadyInPlaylist = isSongInPlaylist(currentSongIds, this.songs, item.id);
+
+      if (alreadyInPlaylist) {
+        const prog: ImportTrackProgress = {
+          id: item.id,
+          title: item.title,
+          artist: item.artist,
+          url: item.url,
+          thumbnail: item.thumbnail,
+          status: "already_in_playlist",
+        };
+        results.push(prog);
+        options?.onProgress?.(prog);
+        skipped++;
+        continue;
+      }
+
+      // 2. Check if already extracted in library songs
+      const existing = findExistingSongForYouTubeId(this.songs, item.id);
+      if (
+        existing &&
+        existing.source_type === "youtube_extracted" &&
+        existing.audio_url
+      ) {
+        // Reuse existing song without downloading again
+        await this.addSongToPlaylist(playlistId, existing.id);
+        const prog: ImportTrackProgress = {
+          id: item.id,
+          title: item.title,
+          artist: item.artist,
+          url: item.url,
+          thumbnail: item.thumbnail,
+          status: "added",
+          songId: existing.id,
+        };
+        results.push(prog);
+        options?.onProgress?.(prog);
+        completed++;
+        continue;
+      }
+
+      // 3. Extract and upload
+      try {
+        const extractedSong = await extractorFn(item);
+        const savedSong = await this.addSong(extractedSong, playlistId);
+        const prog: ImportTrackProgress = {
+          id: item.id,
+          title: item.title,
+          artist: item.artist,
+          url: item.url,
+          thumbnail: item.thumbnail,
+          status: "added",
+          songId: savedSong.id,
+        };
+        results.push(prog);
+        options?.onProgress?.(prog);
+        completed++;
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : "Extraction failed";
+        const prog: ImportTrackProgress = {
+          id: item.id,
+          title: item.title,
+          artist: item.artist,
+          url: item.url,
+          thumbnail: item.thumbnail,
+          status: "failed",
+          error: errorMsg,
+        };
+        results.push(prog);
+        options?.onProgress?.(prog);
+        failed++;
+      }
+    }
+
+    return { completed, skipped, failed, results };
   }
 }

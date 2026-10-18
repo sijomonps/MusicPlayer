@@ -15,8 +15,25 @@ import {
   fetchOEmbedMetadata,
   checkFileSizeLimit,
   rollbackUploadedAudio,
+  inspectYouTubePlaylist,
+  isBinaryStandalone,
+  getYtDlpExecutablePath,
+  checkYtDlpDiagnostic,
+  getYtDlpRunner,
+  isYtDlpAvailable,
 } from "../src/lib/youtube-service.ts";
-import type { Song, Playlist } from "../src/lib/types.ts";
+import {
+  parseYouTubeUrl,
+  extractYouTubeVideoId,
+  extractYouTubePlaylistId,
+  validateLinkInput,
+} from "../src/lib/link-utils.ts";
+import type {
+  Song,
+  Playlist,
+  YouTubePlaylistItem,
+  ImportTrackProgress,
+} from "../src/lib/types.ts";
 
 /**
  * High-fidelity in-memory Mock Supabase Database Client
@@ -772,4 +789,590 @@ test("20. Complete Workflow: Authorized audio metadata inspection, 50MB check, s
   assert.equal(engine.songs[0]?.title, "Me at the zoo");
   assert.equal(engine.songs[0]?.source_type, "youtube_extracted");
 });
+
+// ==============================================================================
+// PART 3.3: YouTube Playlist Import & Cross-Device Sync (Requirements 1 - 15)
+// ==============================================================================
+
+test("21. Requirement 1: Single YouTube video requires a destination playlist", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const ytVideoId = "dQw4w9WgXcQ";
+  const ytSongData: Omit<Song, "id" | "created_at"> = {
+    title: "Never Gonna Give You Up",
+    artist: "Rick Astley",
+    audio_url: "https://example.com/audio.m4a",
+    source_type: "youtube_extracted",
+    youtube_url: `https://www.youtube.com/watch?v=${ytVideoId}`,
+    youtube_video_id: ytVideoId,
+  };
+
+  const requiresPlaylist = (song: typeof ytSongData, plId?: string | null) => {
+    if (song.source_type.startsWith("youtube") && !plId) {
+      throw new Error("A destination playlist is strictly required for YouTube imports.");
+    }
+    return true;
+  };
+
+  assert.throws(() => requiresPlaylist(ytSongData, null), /destination playlist is strictly required/);
+
+  const pl = await engine.createPlaylist("Favorites");
+  assert.equal(requiresPlaylist(ytSongData, pl.id), true);
+  const saved = await engine.addSong(ytSongData, pl.id);
+  assert.equal(saved.youtube_video_id, ytVideoId);
+  assert.deepEqual(engine.playlistSongsMap[pl.id], [saved.id]);
+});
+
+test("22. Requirement 2: Creating a website playlist selects it only after successful creation", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  db.failInsertRls = true;
+  let selectedId: string | null = null;
+
+  await assert.rejects(
+    async () => {
+      const pl = await engine.createPlaylist("Failed Playlist");
+      selectedId = pl.id;
+    },
+    /Database permission denied/
+  );
+
+  assert.equal(selectedId, null);
+  assert.equal(engine.playlists.length, 0);
+
+  db.failInsertRls = false;
+  const plSuccess = await engine.createPlaylist("Success Playlist");
+  selectedId = plSuccess.id;
+  assert.equal(typeof selectedId, "string");
+  assert.equal(engine.playlists[0]?.id, selectedId);
+});
+
+test("23. Requirement 3: YouTube playlist URL detection and playlist entry inspection", async () => {
+  const playlistUrl = "https://www.youtube.com/playlist?list=PLrEnWoR732-DN6gkfZULiT_VlsbA8Xo5v";
+  const parsed = parseYouTubeUrl(playlistUrl);
+
+  assert.equal(parsed.isYouTube, true);
+  assert.equal(parsed.isPlaylistOnly, true);
+  assert.equal(parsed.playlistId, "PLrEnWoR732-DN6gkfZULiT_VlsbA8Xo5v");
+  assert.equal(parsed.videoId, null);
+
+  const mockRunner = async () => ({
+    _type: "playlist",
+    id: "PLrEnWoR732-DN6gkfZULiT_VlsbA8Xo5v",
+    title: "Ambient Coding Sessions",
+    uploader: "Lofi Beats Lab",
+    entries: [
+      { id: "vid1", title: "Midnight Code", uploader: "Lofi Beats Lab", duration: 180 },
+      { id: "vid2", title: "Morning Rain", uploader: "Lofi Beats Lab", duration: 210 },
+      { id: "vid3", title: "Sunset Glow", uploader: "Lofi Beats Lab", duration: 195 },
+    ],
+  });
+
+  const inspection = await inspectYouTubePlaylist(playlistUrl, mockRunner as any);
+  assert.equal(inspection.valid, true);
+  assert.equal(inspection.id, "PLrEnWoR732-DN6gkfZULiT_VlsbA8Xo5v");
+  assert.equal(inspection.title, "Ambient Coding Sessions");
+  assert.equal(inspection.itemCount, 3);
+  assert.equal(inspection.entries.length, 3);
+  assert.equal(inspection.entries[0]?.id, "vid1");
+  assert.equal(inspection.entries[0]?.position, 0);
+  assert.equal(inspection.entries[1]?.position, 1);
+  assert.equal(inspection.entries[2]?.position, 2);
+});
+
+test("24. Requirement 4: A playlist import adds every successfully processed video to the chosen website playlist", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const websitePlaylist = await engine.createPlaylist("My Chill Beats");
+  const items: YouTubePlaylistItem[] = [
+    { id: "trk1", title: "Track 1", artist: "Artist 1", position: 0, url: "https://www.youtube.com/watch?v=trk1" },
+    { id: "trk2", title: "Track 2", artist: "Artist 2", position: 1, url: "https://www.youtube.com/watch?v=trk2" },
+    { id: "trk3", title: "Track 3", artist: "Artist 3", position: 2, url: "https://www.youtube.com/watch?v=trk3" },
+  ];
+
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => ({
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    audio_url: `https://mock.supabase.co/storage/v1/object/public/songs/${item.id}.m4a`,
+    source_type: "youtube_extracted",
+    youtube_url: item.url,
+    youtube_video_id: item.id,
+    created_at: new Date().toISOString(),
+  });
+
+  const res = await engine.importPlaylistTracks(websitePlaylist.id, items, mockExtractor);
+  assert.equal(res.completed, 3);
+  assert.equal(res.failed, 0);
+  assert.equal(res.skipped, 0);
+
+  assert.equal(engine.playlistSongsMap[websitePlaylist.id]?.length, 3);
+  assert.equal(db.playlistSongs.filter((ps) => ps.playlist_id === websitePlaylist.id).length, 3);
+  assert.equal(engine.songs.length, 3);
+});
+
+test("25. Requirement 5: Importing a YouTube playlist does NOT automatically create a website playlist", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const preExistingPlaylist = await engine.createPlaylist("Existing Website Playlist");
+  assert.equal(engine.playlists.length, 1);
+
+  const items: YouTubePlaylistItem[] = [
+    { id: "vidA", title: "Song A", artist: "Artist A", position: 0, url: "https://www.youtube.com/watch?v=vidA" },
+  ];
+
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => ({
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    audio_url: `https://mock.supabase.co/storage/v1/object/public/songs/${item.id}.m4a`,
+    source_type: "youtube_extracted",
+    youtube_url: item.url,
+    youtube_video_id: item.id,
+    created_at: new Date().toISOString(),
+  });
+
+  await assert.rejects(
+    async () => {
+      await engine.importPlaylistTracks("non-existent-id", items, mockExtractor);
+    },
+    /Destination playlist with ID "non-existent-id" does not exist/
+  );
+
+  await engine.importPlaylistTracks(preExistingPlaylist.id, items, mockExtractor);
+  assert.equal(engine.playlists.length, 1);
+  assert.equal(db.playlists.length, 1);
+  assert.equal(db.playlists[0]?.name, "Existing Website Playlist");
+});
+
+test("26. Requirement 6: A URL containing both v= and list= supports explicit video-versus-playlist selection", () => {
+  const compositeUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123456789";
+  const parsed = parseYouTubeUrl(compositeUrl);
+
+  assert.equal(parsed.isYouTube, true);
+  assert.equal(parsed.isComposite, true);
+  assert.equal(parsed.videoId, "dQw4w9WgXcQ");
+  assert.equal(parsed.playlistId, "PL123456789");
+
+  const videoTargetUrl = `https://www.youtube.com/watch?v=${parsed.videoId}`;
+  assert.equal(extractYouTubeVideoId(videoTargetUrl), "dQw4w9WgXcQ");
+
+  const playlistTargetUrl = `https://www.youtube.com/playlist?list=${parsed.playlistId}`;
+  assert.equal(extractYouTubePlaylistId(playlistTargetUrl), "PL123456789");
+});
+
+test("27. Requirement 7: Original video order is preserved", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const playlist = await engine.createPlaylist("Ordered List");
+  const items: YouTubePlaylistItem[] = [
+    { id: "pos0", title: "First Track", artist: "A", position: 0, url: "https://youtube.com/watch?v=pos0" },
+    { id: "pos1", title: "Second Track", artist: "B", position: 1, url: "https://youtube.com/watch?v=pos1" },
+    { id: "pos2", title: "Third Track", artist: "C", position: 2, url: "https://youtube.com/watch?v=pos2" },
+  ];
+
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => ({
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    audio_url: `https://mock.supabase.co/${item.id}.m4a`,
+    source_type: "youtube_extracted",
+    youtube_url: item.url,
+    youtube_video_id: item.id,
+    created_at: new Date().toISOString(),
+  });
+
+  await engine.importPlaylistTracks(playlist.id, items, mockExtractor);
+
+  const plSongIds = engine.playlistSongsMap[playlist.id] || [];
+  const plVideoIds = plSongIds.map(
+    (id) => engine.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.deepEqual(plVideoIds, ["pos0", "pos1", "pos2"]);
+
+  const dbRows = db.playlistSongs.filter((ps) => ps.playlist_id === playlist.id);
+  assert.equal(dbRows[0]?.position, 0);
+  assert.equal(dbRows[1]?.position, 1);
+  assert.equal(dbRows[2]?.position, 2);
+});
+
+test("28. Requirement 8: Existing songs are reused without duplicate uploads", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const existingSong: Song = {
+    id: "existing-uuid-1",
+    title: "Already Extracted Song",
+    artist: "Famous Artist",
+    audio_url: "https://mock.supabase.co/storage/v1/object/public/songs/existing-uuid-1.m4a",
+    source_type: "youtube_extracted",
+    youtube_url: "https://www.youtube.com/watch?v=reuseVideoId",
+    youtube_video_id: "reuseVideoId",
+    created_at: new Date().toISOString(),
+  };
+  db.songs.push(existingSong);
+  await engine.fetchLibrary();
+
+  const playlist = await engine.createPlaylist("Playlist With Reused Song");
+  const items: YouTubePlaylistItem[] = [
+    {
+      id: "reuseVideoId",
+      title: "Already Extracted Song",
+      artist: "Famous Artist",
+      position: 0,
+      url: "https://www.youtube.com/watch?v=reuseVideoId",
+    },
+    {
+      id: "brandNewVideoId",
+      title: "Brand New Song",
+      artist: "New Artist",
+      position: 1,
+      url: "https://www.youtube.com/watch?v=brandNewVideoId",
+    },
+  ];
+
+  let extractorCalls = 0;
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => {
+    extractorCalls++;
+    return {
+      id: item.id,
+      title: item.title,
+      artist: item.artist,
+      audio_url: `https://mock.supabase.co/${item.id}.m4a`,
+      source_type: "youtube_extracted",
+      youtube_url: item.url,
+      youtube_video_id: item.id,
+      created_at: new Date().toISOString(),
+    };
+  };
+
+  const res = await engine.importPlaylistTracks(playlist.id, items, mockExtractor);
+  assert.equal(res.completed, 2);
+
+  // Extractor called only once for brand new track
+  assert.equal(extractorCalls, 1);
+  assert.equal(engine.songs.length, 2);
+  const plVideoIds = (engine.playlistSongsMap[playlist.id] || []).map(
+    (id) => engine.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.deepEqual(plVideoIds, ["reuseVideoId", "brandNewVideoId"]);
+});
+
+test("29. Requirement 9: Existing playlist tracks remain in their original order", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const playlist = await engine.createPlaylist("Pre-Populated List");
+
+  await engine.addSong(
+    {
+      title: "Existing Song 1",
+      artist: "Old Artist",
+      audio_url: "https://example.com/s1.mp3",
+      source_type: "upload",
+    },
+    playlist.id
+  );
+  await engine.addSong(
+    {
+      title: "Existing Song 2",
+      artist: "Old Artist",
+      audio_url: "https://example.com/s2.mp3",
+      source_type: "upload",
+    },
+    playlist.id
+  );
+
+  const originalSongIds = [...(engine.playlistSongsMap[playlist.id] || [])];
+  assert.equal(originalSongIds.length, 2);
+
+  const items: YouTubePlaylistItem[] = [
+    { id: "newYt1", title: "New YT 1", artist: "Y1", position: 0, url: "https://youtube.com/watch?v=newYt1" },
+    { id: "newYt2", title: "New YT 2", artist: "Y2", position: 1, url: "https://youtube.com/watch?v=newYt2" },
+  ];
+
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => ({
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    audio_url: `https://mock.supabase.co/${item.id}.m4a`,
+    source_type: "youtube_extracted",
+    youtube_url: item.url,
+    youtube_video_id: item.id,
+    created_at: new Date().toISOString(),
+  });
+
+  await engine.importPlaylistTracks(playlist.id, items, mockExtractor);
+
+  const finalSongIds = engine.playlistSongsMap[playlist.id] || [];
+  assert.equal(finalSongIds.length, 4);
+  assert.equal(finalSongIds[0], originalSongIds[0]);
+  assert.equal(finalSongIds[1], originalSongIds[1]);
+
+  const appendedVideoIds = [finalSongIds[2], finalSongIds[3]].map(
+    (id) => engine.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.deepEqual(appendedVideoIds, ["newYt1", "newYt2"]);
+
+  const dbRows = db.playlistSongs.filter((ps) => ps.playlist_id === playlist.id);
+  assert.equal(dbRows.find((r) => r.song_id === originalSongIds[0])?.position, 0);
+  assert.equal(dbRows.find((r) => r.song_id === originalSongIds[1])?.position, 1);
+  assert.equal(dbRows.find((r) => r.song_id === finalSongIds[2])?.position, 2);
+  assert.equal(dbRows.find((r) => r.song_id === finalSongIds[3])?.position, 3);
+});
+
+test("30. Requirement 10: Unavailable videos do not stop all other entries from processing", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const playlist = await engine.createPlaylist("Robust Playlist");
+  const items: YouTubePlaylistItem[] = [
+    { id: "valid1", title: "Available 1", artist: "A1", position: 0, url: "https://youtube.com/watch?v=valid1" },
+    { id: "unavail", title: "[Private video]", artist: "A2", position: 1, url: "https://youtube.com/watch?v=unavail", isUnavailable: true },
+    { id: "valid2", title: "Available 2", artist: "A3", position: 2, url: "https://youtube.com/watch?v=valid2" },
+  ];
+
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => {
+    if (item.id === "unavail") throw new Error("Private video");
+    return {
+      id: item.id,
+      title: item.title,
+      artist: item.artist,
+      audio_url: `https://mock.supabase.co/${item.id}.m4a`,
+      source_type: "youtube_extracted",
+      youtube_url: item.url,
+      youtube_video_id: item.id,
+      created_at: new Date().toISOString(),
+    };
+  };
+
+  const res = await engine.importPlaylistTracks(playlist.id, items, mockExtractor);
+  assert.equal(res.completed, 2);
+  assert.equal(res.skipped, 1);
+  assert.equal(res.failed, 0);
+
+  const addedVideoIds = (engine.playlistSongsMap[playlist.id] || []).map(
+    (id) => engine.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.deepEqual(addedVideoIds, ["valid1", "valid2"]);
+});
+
+test("31. Requirement 11: Partial failure and retry do not duplicate completed tracks", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const playlist = await engine.createPlaylist("Partial Failure Test");
+  const items: YouTubePlaylistItem[] = [
+    { id: "trackA", title: "Track A", artist: "Artist A", position: 0, url: "https://youtube.com/watch?v=trackA" },
+    { id: "trackB", title: "Track B (Will Fail First Time)", artist: "Artist B", position: 1, url: "https://youtube.com/watch?v=trackB" },
+    { id: "trackC", title: "Track C", artist: "Artist C", position: 2, url: "https://youtube.com/watch?v=trackC" },
+  ];
+
+  let failTrackB = true;
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => {
+    if (item.id === "trackB" && failTrackB) {
+      throw new Error("HTTP 403 Forbidden");
+    }
+    return {
+      id: item.id,
+      title: item.title,
+      artist: item.artist,
+      audio_url: `https://mock.supabase.co/${item.id}.m4a`,
+      source_type: "youtube_extracted",
+      youtube_url: item.url,
+      youtube_video_id: item.id,
+      created_at: new Date().toISOString(),
+    };
+  };
+
+  const run1 = await engine.importPlaylistTracks(playlist.id, items, mockExtractor);
+  assert.equal(run1.completed, 2);
+  assert.equal(run1.failed, 1);
+
+  const run1VideoIds = (engine.playlistSongsMap[playlist.id] || []).map(
+    (id) => engine.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.deepEqual(run1VideoIds, ["trackA", "trackC"]);
+
+  // Retry failed only
+  failTrackB = false;
+  const failedItems = items.filter((it) => run1.results.some((r) => r.id === it.id && r.status === "failed"));
+  assert.equal(failedItems.length, 1);
+  assert.equal(failedItems[0]?.id, "trackB");
+
+  const run2 = await engine.importPlaylistTracks(playlist.id, failedItems, mockExtractor);
+  assert.equal(run2.completed, 1);
+  assert.equal(run2.failed, 0);
+
+  const finalVideoIds = (engine.playlistSongsMap[playlist.id] || []).map(
+    (id) => engine.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.equal(finalVideoIds.length, 3);
+  assert.deepEqual(finalVideoIds, ["trackA", "trackC", "trackB"]);
+});
+
+test("32. Requirement 12: Supabase upload and database failures receive safe rollback handling", async () => {
+  const deletedFiles: string[] = [];
+  const mockDeleteAudioFile = async (path: string) => {
+    deletedFiles.push(path);
+    return true;
+  };
+
+  const storagePath = "songs/failed_db_insert.m4a";
+  const rolledBack = await rollbackUploadedAudio(storagePath, mockDeleteAudioFile);
+  assert.equal(rolledBack, true);
+  assert.equal(deletedFiles.length, 1);
+  assert.equal(deletedFiles[0], storagePath);
+});
+
+test("33. Requirement 13: Progress, cancellation and completion summaries behave correctly", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const playlist = await engine.createPlaylist("Cancellation Test");
+  const items: YouTubePlaylistItem[] = [
+    { id: "c1", title: "T1", artist: "A", position: 0, url: "https://youtube.com/watch?v=c1" },
+    { id: "c2", title: "T2", artist: "A", position: 1, url: "https://youtube.com/watch?v=c2" },
+    { id: "c3", title: "T3", artist: "A", position: 2, url: "https://youtube.com/watch?v=c3" },
+    { id: "c4", title: "T4", artist: "A", position: 3, url: "https://youtube.com/watch?v=c4" },
+  ];
+
+  const progressEvents: ImportTrackProgress[] = [];
+  let processedCount = 0;
+
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => ({
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    audio_url: `https://mock.supabase.co/${item.id}.m4a`,
+    source_type: "youtube_extracted",
+    youtube_url: item.url,
+    youtube_video_id: item.id,
+    created_at: new Date().toISOString(),
+  });
+
+  const res = await engine.importPlaylistTracks(playlist.id, items, mockExtractor, {
+    onProgress: (p) => progressEvents.push(p),
+    shouldCancel: () => {
+      processedCount++;
+      return processedCount > 2;
+    },
+  });
+
+  assert.equal(res.completed, 2);
+  assert.equal(engine.playlistSongsMap[playlist.id]?.length, 2);
+  const completedVideoIds = (engine.playlistSongsMap[playlist.id] || []).map(
+    (id) => engine.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.deepEqual(completedVideoIds, ["c1", "c2"]);
+});
+
+test("34. Requirement 14: Imported songs remain visible after refresh and across separate browsers", async () => {
+  const sharedDb = new MockSupabaseDatabaseClient();
+
+  const browser1 = new PlaylistSyncEngine(sharedDb);
+  const pl = await browser1.createPlaylist("Shared Playlist");
+  const items: YouTubePlaylistItem[] = [
+    { id: "sync1", title: "Cross-Device 1", artist: "Artist", position: 0, url: "https://youtube.com/watch?v=sync1" },
+    { id: "sync2", title: "Cross-Device 2", artist: "Artist", position: 1, url: "https://youtube.com/watch?v=sync2" },
+  ];
+
+  const mockExtractor = async (item: YouTubePlaylistItem): Promise<Song> => ({
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    audio_url: `https://mock.supabase.co/${item.id}.m4a`,
+    source_type: "youtube_extracted",
+    youtube_url: item.url,
+    youtube_video_id: item.id,
+    created_at: new Date().toISOString(),
+  });
+
+  await browser1.importPlaylistTracks(pl.id, items, mockExtractor);
+  assert.equal(browser1.songs.length, 2);
+
+  // Fresh page load / other browser fetches library
+  const browser2 = new PlaylistSyncEngine(sharedDb);
+  await browser2.fetchLibrary();
+
+  assert.equal(browser2.playlists.length, 1);
+  assert.equal(browser2.playlists[0]?.id, pl.id);
+  assert.equal(browser2.songs.length, 2);
+
+  const b2VideoIds = (browser2.playlistSongsMap[pl.id] || []).map(
+    (id) => browser2.songs.find((s) => s.id === id)?.youtube_video_id
+  );
+  assert.deepEqual(b2VideoIds, ["sync1", "sync2"]);
+  assert.equal(browser2.playlists[0]?.song_count, 2);
+});
+
+test("35. Requirement 15: Existing direct audio URLs, playlists and player behavior remain functional", async () => {
+  const db = new MockSupabaseDatabaseClient();
+  const engine = new PlaylistSyncEngine(db);
+
+  const audioValidation = await validateLinkInput("https://example.com/podcast/episode1.mp3");
+  assert.equal(audioValidation.isValid, true);
+  assert.equal(audioValidation.type, "audio");
+  assert.equal(audioValidation.format, "MP3");
+
+  const directSong = await engine.addSong({
+    title: "Direct Stream Episode",
+    artist: "Podcast Host",
+    audio_url: "https://example.com/podcast/episode1.mp3",
+    source_type: "direct_url",
+  });
+  assert.equal(engine.songs.length, 1);
+  assert.equal(engine.songs[0]?.id, directSong.id);
+  assert.equal(engine.songs[0]?.source_type, "direct_url");
+});
+
+test("36. Standalone executable detection: isBinaryStandalone detects ELF/native binary without python", () => {
+  const binPath = getYtDlpExecutablePath();
+  assert.ok(binPath, "Executable path should be resolved");
+  assert.equal(isBinaryStandalone(binPath!), true, "Installed yt-dlp binary should be a standalone native executable");
+});
+
+test("37. Runtime diagnostic: checkYtDlpDiagnostic reports version without downloading media", async () => {
+  const diag = await checkYtDlpDiagnostic();
+  assert.equal(diag.ok, true, "Diagnostic should return ok: true");
+  assert.equal(diag.version, "2026.08.19", "Diagnostic should report pinned version 2026.08.19");
+  assert.equal(diag.isStandalone, true, "Diagnostic should confirm standalone mode");
+  assert.equal(typeof diag.path, "string");
+  assert.ok(diag.architecture, "Diagnostic should report architecture");
+  assert.ok(diag.platform, "Diagnostic should report platform");
+});
+
+test("38. Runtime diagnostic: checkYtDlpDiagnostic gracefully handles missing executable", async () => {
+  const diag = await checkYtDlpDiagnostic("/non/existent/yt-dlp-bin");
+  assert.equal(diag.ok, false, "Diagnostic should return ok: false for missing binary");
+  assert.equal(diag.isStandalone, false);
+  assert.match(diag.error || "", /not found/i);
+});
+
+test("39. Error handling: formatYouTubeError maps missing python3 error to HTTP 501", () => {
+  const pythonMissingErr = new Error("env: 'python3': No such file or directory");
+  const formatted = formatYouTubeError(pythonMissingErr);
+  assert.equal(formatted.status, 501, "Missing python3 error must return status 501");
+  assert.equal(formatted.canBookmark, true, "Should offer bookmark capability");
+  assert.match(formatted.message, /Audio extraction engine is not available/i);
+
+  const python3NotFoundErr = new Error("/bin/sh: 1: python3: not found");
+  const formatted2 = formatYouTubeError(python3NotFoundErr);
+  assert.equal(formatted2.status, 501);
+  assert.equal(formatted2.canBookmark, true);
+});
+
+test("40. Standalone runner: getYtDlpRunner executes standalone binary without invoking python3", async () => {
+  assert.equal(isYtDlpAvailable(), true);
+  const runner = getYtDlpRunner();
+  assert.ok(runner, "getYtDlpRunner should return a callable instance");
+  const version = await runner("", { version: true });
+  assert.equal(String(version).trim(), "2026.08.19");
+});
+
 

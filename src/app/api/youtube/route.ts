@@ -2,14 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import youtubedl from "youtube-dl-exec";
 import {
   isSupabaseStorageConfigured,
   getSupabaseAdminClient,
   getStorageUsage,
   uploadAudioBuffer,
 } from "@/lib/supabase/storage";
-import { isYouTubeUrl } from "@/lib/link-utils";
+import {
+  isYouTubeUrl,
+  extractYouTubeVideoId,
+  parseYouTubeUrl,
+} from "@/lib/link-utils";
 import { checkRateLimit } from "@/lib/security";
 
 export const maxDuration = 60;
@@ -22,19 +25,38 @@ const NO_CACHE_HEADERS = {
 
 import {
   isYtDlpAvailable,
+  getYtDlpRunner,
+  checkYtDlpDiagnostic,
   formatYouTubeError,
   fetchOEmbedMetadata,
   checkFileSizeLimit,
   rollbackUploadedAudio,
+  inspectYouTubePlaylist,
 } from "@/lib/youtube-service";
 
 /**
- * GET /api/youtube?url=...
- * Inspects a YouTube video URL and returns its metadata (title, author, thumbnail).
+ * GET /api/youtube?url=...&action=playlist|video|diagnostic
+ * Inspects a YouTube video URL or playlist URL, or checks runtime diagnostics.
  * Fast, serverless-safe, and resilient.
  */
 export async function GET(req: NextRequest) {
+  const actionParam = req.nextUrl.searchParams.get("action")?.trim();
+
+  // 1. Runtime diagnostic check: reports standalone binary version & path without downloading media
+  if (
+    actionParam === "diagnostic" ||
+    actionParam === "health" ||
+    actionParam === "version"
+  ) {
+    const diag = await checkYtDlpDiagnostic();
+    return NextResponse.json(diag, {
+      status: diag.ok ? 200 : 500,
+      headers: NO_CACHE_HEADERS,
+    });
+  }
+
   const urlParam = req.nextUrl.searchParams.get("url")?.trim();
+
   if (!urlParam) {
     return NextResponse.json(
       { error: "Missing YouTube url parameter." },
@@ -52,16 +74,29 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  const parsedYt = parseYouTubeUrl(urlParam);
+
   try {
+    // 1. Playlist Inspection
+    if (actionParam === "playlist" || (!actionParam && parsedYt.isPlaylistOnly)) {
+      const playlistInfo = await inspectYouTubePlaylist(urlParam);
+      return NextResponse.json(playlistInfo, { headers: NO_CACHE_HEADERS });
+    }
+
+    // 2. Video Inspection via oEmbed
     const meta = await fetchOEmbedMetadata(urlParam);
 
     return NextResponse.json(
       {
         valid: true,
+        type: "video",
+        id: parsedYt.videoId,
         title: meta.title,
         artist: meta.artist,
         duration: 0,
         thumbnail: meta.thumbnail,
+        playlistId: parsedYt.playlistId,
+        isComposite: parsedYt.isComposite,
       },
       { headers: NO_CACHE_HEADERS }
     );
@@ -169,7 +204,8 @@ export async function POST(req: NextRequest) {
 
     try {
       // Use best native audio stream to avoid ffmpeg transcoding dependencies where possible
-      await youtubedl(trimmedUrl, {
+      const runner = getYtDlpRunner();
+      await runner(trimmedUrl, {
         format: "bestaudio[ext=m4a]/bestaudio/best",
         output: path.join(tempDir, "audio.%(ext)s"),
         noWarnings: true,
@@ -248,6 +284,7 @@ export async function POST(req: NextRequest) {
           { status: 500, headers: NO_CACHE_HEADERS }
         );
       }
+      const videoId = extractYouTubeVideoId(trimmedUrl);
       const songRow: Record<string, unknown> = {
         id: trackId,
         title: finalTitle,
@@ -260,26 +297,44 @@ export async function POST(req: NextRequest) {
         artwork_url: artwork || null,
         source_type: "youtube_extracted",
         youtube_url: trimmedUrl,
+        youtube_video_id: videoId || null,
         created_at: createdAt,
       };
 
       let dbInsertSuccess = false;
       let dbErrorMsg = "";
 
-      const insertRes = await adminClient.from("songs").insert(songRow);
+      let insertRes = await adminClient.from("songs").insert(songRow);
 
       if (insertRes.error) {
-        // If storage_path column is missing in schema, retry without it
-        if (insertRes.error.message.includes("storage_path")) {
+        // If storage_path or youtube_video_id columns are missing, gracefully remove and retry
+        let needsRetry = false;
+        if (insertRes.error.message.includes("storage_path") && "storage_path" in songRow) {
           delete songRow.storage_path;
-          const retryRes = await adminClient.from("songs").insert(songRow);
-          if (retryRes.error) {
-            dbErrorMsg = retryRes.error.message;
-          } else {
-            dbInsertSuccess = true;
+          needsRetry = true;
+        }
+        if (insertRes.error.message.includes("youtube_video_id") && "youtube_video_id" in songRow) {
+          delete songRow.youtube_video_id;
+          needsRetry = true;
+        }
+
+        if (needsRetry) {
+          insertRes = await adminClient.from("songs").insert(songRow);
+          if (insertRes.error) {
+            if (insertRes.error.message.includes("youtube_video_id") && "youtube_video_id" in songRow) {
+              delete songRow.youtube_video_id;
+              insertRes = await adminClient.from("songs").insert(songRow);
+            } else if (insertRes.error.message.includes("storage_path") && "storage_path" in songRow) {
+              delete songRow.storage_path;
+              insertRes = await adminClient.from("songs").insert(songRow);
+            }
           }
-        } else {
+        }
+
+        if (insertRes.error) {
           dbErrorMsg = insertRes.error.message;
+        } else {
+          dbInsertSuccess = true;
         }
       } else {
         dbInsertSuccess = true;
@@ -313,6 +368,7 @@ export async function POST(req: NextRequest) {
             duration: 0,
             source_type: "youtube_extracted",
             youtube_url: trimmedUrl,
+            youtube_video_id: videoId || undefined,
             created_at: createdAt,
           },
         },
