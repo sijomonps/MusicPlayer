@@ -561,6 +561,29 @@ export async function rollbackUploadedAudio(
 }
 
 /**
+ * Resolves cookie configuration for yt-dlp.
+ * Supports a local cookies.txt file or the YOUTUBE_COOKIES / YOUTUBE_COOKIE environment variable.
+ */
+export function getYouTubeCookieOptions(): { cookiefile?: string } {
+  try {
+    const localCookies = path.resolve(process.cwd(), "cookies.txt");
+    if (fs.existsSync(/*turbopackIgnore: true*/ localCookies)) {
+      return { cookiefile: localCookies };
+    }
+
+    const cookieEnv = process.env.YOUTUBE_COOKIES || process.env.YOUTUBE_COOKIE;
+    if (cookieEnv && cookieEnv.trim()) {
+      const tmpCookies = "/tmp/youtube-cookies.txt";
+      fs.writeFileSync(/*turbopackIgnore: true*/ tmpCookies, cookieEnv.trim(), { mode: 0o600 });
+      return { cookiefile: tmpCookies };
+    }
+  } catch (err) {
+    console.warn("[yt-dlp] Note: Could not prepare cookies file:", err);
+  }
+  return {};
+}
+
+/**
  * Inspects a YouTube playlist without downloading any audio streams upfront.
  * Uses flat-playlist JSON dump for fast serverless execution.
  */
@@ -579,7 +602,8 @@ export async function inspectYouTubePlaylist(
 
   const runner = customRunner || getYtDlpRunner();
 
-  // Execute flat playlist inspection
+  // Execute flat playlist inspection with mobile client fallback to prevent bot challenges
+  const cookieOpts = getYouTubeCookieOptions();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let rawData: any;
   try {
@@ -587,7 +611,9 @@ export async function inspectYouTubePlaylist(
       dumpSingleJson: true,
       flatPlaylist: true,
       noWarnings: true,
+      extractorArgs: "youtube:player_client=android,ios,web",
       jsRuntimes: `node:${process.execPath}`,
+      ...cookieOpts,
     });
   } catch (err) {
     throw err;

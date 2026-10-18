@@ -28,6 +28,7 @@ import {
   getYtDlpRunner,
   ensureYtDlpBinaryReady,
   checkYtDlpDiagnostic,
+  getYouTubeCookieOptions,
   formatYouTubeError,
   fetchOEmbedMetadata,
   checkFileSizeLimit,
@@ -212,13 +213,16 @@ export async function POST(req: NextRequest) {
     try {
       // Use best native audio stream to avoid ffmpeg transcoding dependencies where possible
       const runner = getYtDlpRunner();
+      const cookieOpts = getYouTubeCookieOptions();
       await runner(trimmedUrl, {
-        format: "bestaudio[ext=m4a]/bestaudio/best",
+        format: "bestaudio[ext=m4a]/bestaudio/best[height<=480]/best",
         output: path.join(tempDir, "audio.%(ext)s"),
         noWarnings: true,
         noPlaylist: true,
         preferFreeFormats: true,
+        extractorArgs: "youtube:player_client=android,ios,web",
         jsRuntimes: `node:${process.execPath}`,
+        ...cookieOpts,
       });
 
       // Find the generated audio file
@@ -229,7 +233,8 @@ export async function POST(req: NextRequest) {
           f.endsWith(".mp3") ||
           f.endsWith(".webm") ||
           f.endsWith(".opus") ||
-          f.endsWith(".aac")
+          f.endsWith(".aac") ||
+          f.endsWith(".mp4")
       );
 
       if (!audioFileName) {
@@ -251,11 +256,12 @@ export async function POST(req: NextRequest) {
       }
 
       const fileBuffer = fs.readFileSync(filePath);
-      const mimeType = audioFileName.endsWith(".m4a")
-        ? "audio/mp4"
-        : audioFileName.endsWith(".webm")
-        ? "audio/webm"
-        : "audio/mpeg";
+      const mimeType =
+        audioFileName.endsWith(".m4a") || audioFileName.endsWith(".mp4")
+          ? "audio/mp4"
+          : audioFileName.endsWith(".webm") || audioFileName.endsWith(".opus")
+          ? "audio/webm"
+          : "audio/mpeg";
 
       // 8. Upload to Supabase Storage with zero cache header
       const trackId = crypto.randomUUID();

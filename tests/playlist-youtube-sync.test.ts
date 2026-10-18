@@ -21,6 +21,7 @@ import {
   checkYtDlpDiagnostic,
   getYtDlpRunner,
   ensureYtDlpBinaryReady,
+  getYouTubeCookieOptions,
   isYtDlpAvailable,
 } from "../src/lib/youtube-service.ts";
 import {
@@ -1381,6 +1382,29 @@ test("41. Standalone readiness: ensureYtDlpBinaryReady verifies or prepares exec
   assert.ok(readyPath, "Should return an executable path");
   assert.equal(isBinaryStandalone(readyPath), true, "Prepared binary must be standalone native ELF/Mach-O/PE");
 });
+
+test("42. Datacenter challenge bypass: getYouTubeCookieOptions and mobile client extractor args", () => {
+  // Test cookie resolution without environment set
+  const origEnv = process.env.YOUTUBE_COOKIE;
+  try {
+    delete process.env.YOUTUBE_COOKIE;
+    delete process.env.YOUTUBE_COOKIES;
+    const emptyOpts = getYouTubeCookieOptions();
+    assert.deepEqual(typeof emptyOpts, "object");
+
+    // Test with YOUTUBE_COOKIE set
+    process.env.YOUTUBE_COOKIE = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tsample_value";
+    const withEnvOpts = getYouTubeCookieOptions();
+    assert.ok(withEnvOpts.cookiefile, "Should return temporary cookie file path");
+  } finally {
+    if (origEnv !== undefined) {
+      process.env.YOUTUBE_COOKIE = origEnv;
+    } else {
+      delete process.env.YOUTUBE_COOKIE;
+    }
+  }
+});
+
 
 
 
