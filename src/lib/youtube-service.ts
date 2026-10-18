@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import youtubedl from "youtube-dl-exec";
 import {
   isYouTubeUrl,
@@ -72,18 +73,21 @@ export function getYtDlpExecutablePath(customBinPath?: string): string | null {
       return process.env.YT_DLP_PATH;
     }
 
-    // Candidate locations
+    // Candidate locations - strictly prioritizes native standalone binaries
     const candidates = [
+      "/tmp/yt-dlp",
       path.resolve(process.cwd(), "bin/yt-dlp"),
       path.resolve(process.cwd(), "bin/yt-dlp.exe"),
       path.resolve(process.cwd(), "node_modules/youtube-dl-exec/bin/yt-dlp"),
       path.resolve(process.cwd(), "node_modules/youtube-dl-exec/bin/yt-dlp.exe"),
-      "/tmp/yt-dlp",
     ];
 
     let foundPath: string | null = null;
     for (const candidate of candidates) {
-      if (fs.existsSync(/*turbopackIgnore: true*/ candidate)) {
+      if (
+        fs.existsSync(/*turbopackIgnore: true*/ candidate) &&
+        isBinaryStandalone(candidate)
+      ) {
         foundPath = candidate;
         break;
       }
@@ -97,9 +101,15 @@ export function getYtDlpExecutablePath(customBinPath?: string): string | null {
     // /tmp is the guaranteed writable POSIX filesystem where chmod +x works reliably.
     if (isServerless) {
       const tmpTarget = "/tmp/yt-dlp";
+      if (foundPath === tmpTarget && isBinaryStandalone(tmpTarget)) {
+        return tmpTarget;
+      }
       try {
         let needCopy = true;
-        if (fs.existsSync(/*turbopackIgnore: true*/ tmpTarget)) {
+        if (
+          fs.existsSync(/*turbopackIgnore: true*/ tmpTarget) &&
+          isBinaryStandalone(tmpTarget)
+        ) {
           const srcStat = fs.statSync(/*turbopackIgnore: true*/ foundPath);
           const tmpStat = fs.statSync(/*turbopackIgnore: true*/ tmpTarget);
           if (srcStat.size === tmpStat.size) {
@@ -132,6 +142,61 @@ export function getYtDlpExecutablePath(customBinPath?: string): string | null {
   } catch {
     return null;
   }
+}
+
+export const PINNED_YTDLP_RELEASE = "2026.08.19";
+export const PINNED_YTDLP_SHA256 = "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a";
+export const PINNED_YTDLP_URL = `https://github.com/yt-dlp/yt-dlp/releases/download/${PINNED_YTDLP_RELEASE}/yt-dlp_linux`;
+
+/**
+ * Ensures that a verified standalone native yt-dlp binary is available and executable.
+ * If not bundled or present on the filesystem, downloads the pinned release directly
+ * into /tmp/yt-dlp with cryptographic SHA-256 verification and 0755 execute permissions.
+ */
+export async function ensureYtDlpBinaryReady(customBinPath?: string): Promise<string> {
+  const existingPath = getYtDlpExecutablePath(customBinPath);
+  if (existingPath && isBinaryStandalone(existingPath)) {
+    return existingPath;
+  }
+
+  // Fallback: If not bundled, fetch pinned standalone Linux x86-64 binary into /tmp/yt-dlp
+  const tmpTarget = "/tmp/yt-dlp";
+  if (fs.existsSync(/*turbopackIgnore: true*/ tmpTarget)) {
+    try {
+      const buf = fs.readFileSync(/*turbopackIgnore: true*/ tmpTarget);
+      const hash = crypto.createHash("sha256").update(buf).digest("hex");
+      if (hash === PINNED_YTDLP_SHA256) {
+        fs.chmodSync(/*turbopackIgnore: true*/ tmpTarget, 0o755);
+        return tmpTarget;
+      }
+    } catch {
+      // Continue to download below
+    }
+  }
+
+  console.log(`[yt-dlp] Standalone binary not found on disk, fetching pinned ${PINNED_YTDLP_RELEASE} to ${tmpTarget}...`);
+  const res = await fetch(PINNED_YTDLP_URL, {
+    redirect: "follow",
+    headers: { "User-Agent": "SijomonsMusic/1.0" },
+  });
+  if (!res.ok) {
+    throw new Error(
+      `Audio extraction engine is unavailable: failed to download standalone yt-dlp (${res.status} ${res.statusText})`
+    );
+  }
+  const arrayBuf = await res.arrayBuffer();
+  const buffer = Buffer.from(arrayBuf);
+  const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+  if (hash !== PINNED_YTDLP_SHA256) {
+    throw new Error(
+      `Integrity check failed: standalone yt-dlp checksum mismatch.\nExpected: ${PINNED_YTDLP_SHA256}\nReceived: ${hash}`
+    );
+  }
+
+  fs.writeFileSync(/*turbopackIgnore: true*/ tmpTarget, buffer, { mode: 0o755 });
+  fs.chmodSync(/*turbopackIgnore: true*/ tmpTarget, 0o755);
+  console.log(`[yt-dlp] Verified and prepared standalone yt-dlp binary at ${tmpTarget}`);
+  return tmpTarget;
 }
 
 /**
@@ -174,7 +239,15 @@ export async function checkYtDlpDiagnostic(customBinPath?: string): Promise<{
   error?: string;
 }> {
   try {
-    const binPath = getYtDlpExecutablePath(customBinPath);
+    let binPath = getYtDlpExecutablePath(customBinPath);
+    if (!binPath && !customBinPath) {
+      try {
+        binPath = await ensureYtDlpBinaryReady();
+      } catch (e: unknown) {
+        console.warn("[diagnostic] Failed to fetch fallback binary:", e);
+      }
+    }
+
     if (!binPath) {
       return {
         ok: false,

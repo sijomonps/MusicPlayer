@@ -20,6 +20,7 @@ import {
   getYtDlpExecutablePath,
   checkYtDlpDiagnostic,
   getYtDlpRunner,
+  ensureYtDlpBinaryReady,
   isYtDlpAvailable,
 } from "../src/lib/youtube-service.ts";
 import {
@@ -1374,5 +1375,12 @@ test("40. Standalone runner: getYtDlpRunner executes standalone binary without i
   const version = await runner("", { version: true });
   assert.equal(String(version).trim(), "2026.08.19");
 });
+
+test("41. Standalone readiness: ensureYtDlpBinaryReady verifies or prepares executable in /tmp if missing", async () => {
+  const readyPath = await ensureYtDlpBinaryReady();
+  assert.ok(readyPath, "Should return an executable path");
+  assert.equal(isBinaryStandalone(readyPath), true, "Prepared binary must be standalone native ELF/Mach-O/PE");
+});
+
 
 

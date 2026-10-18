@@ -26,6 +26,7 @@ const NO_CACHE_HEADERS = {
 import {
   isYtDlpAvailable,
   getYtDlpRunner,
+  ensureYtDlpBinaryReady,
   checkYtDlpDiagnostic,
   formatYouTubeError,
   fetchOEmbedMetadata,
@@ -172,7 +173,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 5. Verify runtime downloader availability
+    // 5. Verify runtime downloader availability and ensure binary is ready
+    try {
+      await ensureYtDlpBinaryReady();
+    } catch {
+      // Continue to check isYtDlpAvailable fallback
+    }
+
     if (!isYtDlpAvailable()) {
       return NextResponse.json(
         {
