@@ -1,91 +1,86 @@
-# Minimal Music Player
+# Sijomons Music
 
-A minimal, lightweight music player built with **Next.js (App Router)**, **TypeScript**, and **Tailwind CSS**. Designed specifically for single-handed use on **iPhone 12 mini** through Safari, with continuous **lock-screen background playback**.
+An ultra-minimal, animated, mobile-first web app built with **Next.js 16 (App Router)**, **React 19**, **Supabase Database & Storage**, and **Tailwind CSS 4**. Designed for effortless single-handed use on **iPhone 12 mini** through Safari, with continuous **lock-screen background playback** and **instant multi-device sync**.
 
 ---
 
 ## Features
 
-- **iPhone Background Playback**: Music continues playing when your iPhone screen is locked. Includes lock-screen metadata (artwork, title, artist) and controls (play, pause, next, prev, seek) via the standard Media Session API.
-- **Single Persistent Audio Element**: Avoids creating new `<audio>` elements across songs, preserving the active iOS Safari audio session in the background.
-- **HTTP Range Requests (206 Partial Content)**: Audio streaming route supports byte ranges, enabling seeking and duration tracking on iOS Safari.
-- **Local Device Storage (No Login Required)**:
-  - Playlists, custom song order, and library metadata automatically persist in your browser (`localStorage`).
-  - Opens instantly without any login or account creation friction.
-  - *Note: Browser storage is stored locally on the current device/browser and is not automatically synced across separate devices.*
+- **Multi-Device Realtime Sync**:
+  - Supabase Database is the main source of truth (`songs`, `playlists`, `playlist_songs`).
+  - Realtime subscriptions push live updates across all open browsers and devices without manual refresh.
+  - Automatic one-time safe migration from legacy `localStorage` with zero data loss or duplicates.
+- **Passcode-Free Uploads**:
+  - No passcode modals, tokens, or friction.
+  - Server-side security includes strict 50 MB limit, audio MIME validation, safe relative path traversal checks, and IP rate limiting (60 req/min for uploads, 30 req/min for extractions).
+  - `SUPABASE_SERVICE_ROLE_KEY` is kept strictly on the server; client queries use `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+- **Zero Local Cache Policy**:
+  - Audio files strictly stream from Supabase CDN and are never accumulated in browser Cache Storage.
+  - Dynamic API routes use `Cache-Control: no-store, max-age=0`.
+  - Cache Storage and lingering service workers are cleared on app mount.
+  - Persistent `<audio>` element uses `preload="none"`.
+- **iPhone Background Playback**:
+  - Music continues playing uninterrupted when your iPhone screen is locked.
+  - Single persistent `<audio>` element preserves active iOS Safari audio session.
+  - Lock-screen metadata (artwork, title, artist) and controls (play, pause, next, prev, scrub) via the standard Media Session API.
 - **Add Music**:
-  - **YouTube Links**: Saved as quick-access bookmarks with metadata (title, author, thumbnail). *No audio is extracted or downloaded.*
-  - **Direct Audio URLs (MP3, M4A, AAC, WAV, FLAC)**: Added directly to your streaming library.
-  - **Cloudflare R2 Uploads**: Upload owned audio files (up to 50 MB) directly to cloud storage.
-- **Playlists**:
-  - Create, rename, and delete playlists.
-  - Add or remove tracks.
-  - Reorder songs using drag-and-drop or one-touch **Move Up / Down** buttons optimized for iPhone 12 mini thumb reach.
-  - Automatically saves all order changes.
-- **Minimal & Premium UI**:
-  - Dark mode by default (high contrast, OLED-friendly).
-  - Responsive layout (desktop sidebar + mobile bottom navigation).
-  - Expandable full-screen player with large scrubber and queue.
-
----
-
-## iPhone Safari Background Playback & Technical Notes
-
-### How Screen-Lock Background Playback Works
-1. **Persistent `<audio>` Element**: iOS Safari suspends or denies audio playback if a new `<audio>` DOM node is instantiated while the device is locked or the tab is backgrounded. Minimal Player uses a single, persistent `<audio>` element mounted once in the app root.
-2. **Auto-Advance on Lock Screen**: When a track finishes, the `ended` event listener on the persistent audio element synchronously switches `audio.src` to the next track and calls `audio.play()`. Because this occurs inside the active playback event loop, iOS Safari permits continuous playback without interruption.
-3. **Media Session API**: Lock-screen playback controls (`play`, `pause`, `previoustrack`, `nexttrack`, `seekto`, `seekbackward`, `seekforward`) and metadata are registered via `navigator.mediaSession`.
-4. **HTTP Range Requests (`206 Partial Content`)**: iOS Safari requires servers to respond with `206 Partial Content` and `Accept-Ranges: bytes` when streaming audio. If a server responds with `200 OK`, Safari cannot reliably scrub or display the total duration, often terminating playback. The `/api/stream?key=...` endpoint handles byte-range requests for Cloudflare R2.
-
-### iOS Safari Limitations & Honest Quirks
-- **Initial User Gesture**: Safari prohibits autoplay without an initial user touch. You must tap play at least once after opening the website.
-- **Volume Controls**: Apple disables programmatic volume control (`audio.volume = x`) on iOS Safari. Volume must be adjusted via the physical iPhone volume buttons.
-- **Safari Memory Eviction**: If you leave the locked phone playing for many hours or open dozens of heavy tabs, iOS Safari may evict the tab from memory if system RAM runs low. Minimal Player is kept lightweight with zero bloated client libraries to prevent this.
-
----
-
-## Storage & Upload Security (No Login Required)
-
-### Local Storage
-- All playlist names, track lists, order, and bookmarks are automatically saved to browser `localStorage`.
-- Storage is private to the current device/browser.
-
-### Protecting Cloudflare R2 Uploads (`UPLOAD_SECRET`)
-To prevent strangers on the internet from uploading files to your Cloudflare R2 bucket without requiring a complicated user login system, you can set an `UPLOAD_SECRET` in `.env.local` / Vercel:
-```env
-UPLOAD_SECRET=my-private-upload-passcode
-```
-When configured:
-1. The server rejects any upload without this passcode (`401 Unauthorized`).
-2. When uploading in the app, you enter your passcode once. The app remembers it in your phone's browser so you never have to retype it.
+  - **File Uploads**: MP3, M4A, AAC, WAV, FLAC, OGG up to 50 MB uploaded directly to Supabase Storage.
+  - **YouTube Extraction**: Extracts audio with yt-dlp, automatically bypassing bot challenges using browser cookies / `cookies.txt` and android/web player client args.
+  - **Direct Audio URLs**: Streamable web links added straight to library.
+  - **Playlist Assignment**: Select or create a playlist on-the-fly directly inside the Add Music modal.
+- **Ultra-Minimal UI**:
+  - Dark glassmorphic aesthetic optimized for iPhone 12 mini.
+  - Floating mini player pill above bottom nav and animated full-screen player sheet.
+  - Three-bar animated equalizer on active track rows.
 
 ---
 
 ## Getting Started
 
-### 1. Install Dependencies & Run
+### 1. Database Setup
+
+Run the SQL script located at `src/lib/supabase/schema.sql` in your **Supabase Dashboard > SQL Editor**:
+- Creates `songs`, `playlists`, and `playlist_songs` tables with `TEXT` primary keys.
+- Adds Row Level Security (RLS) policies allowing public personal access via the anon key.
+- Enables Supabase Realtime replication on `songs`, `playlists`, and `playlist_songs`.
+- Configures the `songs` public storage bucket.
+
+### 2. Environment Variables
+
+Create `.env.local` using `.env.example`:
+
+```bash
+cp .env.example .env.local
+```
+
+Fill in your Supabase project credentials:
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_key_here
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key_here
+SUPABASE_STORAGE_BUCKET=songs
+```
+
+### 3. Run Development Server
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) on your desktop or iPhone Safari (via local network IP).
+Open [http://localhost:3000](http://localhost:3000) on your desktop or iPhone Safari.
 
-### 2. Environment Variables
+---
 
-Create `.env.local` from `.env.example`:
+## Running Tests and Linting
 
 ```bash
-cp .env.example .env.local
-```
+# Run unit tests (25 tests covering storage, security, rate limiting, and link parsing)
+npm run test
 
-### Cloudflare R2 Variables (When ready for R2):
-```env
-R2_ACCOUNT_ID=your-cloudflare-account-id
-R2_ACCESS_KEY_ID=your-r2-access-key-id
-R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
-R2_BUCKET_NAME=your-r2-bucket-name
-R2_PUBLIC_URL=          # Optional: leave empty to stream through /api/stream
-UPLOAD_SECRET=          # Optional: secret passcode to protect R2 uploads
+# Run ESLint
+npm run lint
+
+# Production build
+npm run build
 ```

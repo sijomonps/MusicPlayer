@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   X,
   Link2,
@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   Loader2,
   Music2,
-  Key,
   Plus,
 } from "lucide-react";
 import { YoutubeIcon } from "@/components/icons/YoutubeIcon";
@@ -50,25 +49,16 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadArtist, setUploadArtist] = useState("");
 
-  // Passcode state
-  const [savedSecret, setSavedSecret] = useState<string>(() => {
+  // Purge legacy passcode from storage on mount
+  useEffect(() => {
     if (typeof window !== "undefined") {
-      return localStorage.getItem("minimal_upload_secret") || "";
+      try {
+        localStorage.removeItem("minimal_upload_secret");
+      } catch {
+        // Ignore storage access errors
+      }
     }
-    return "";
-  });
-  const [uploadSecret, setUploadSecret] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("minimal_upload_secret") || "";
-    }
-    return "";
-  });
-  const [isEditingPasscode, setIsEditingPasscode] = useState(() => {
-    if (typeof window !== "undefined") {
-      return !localStorage.getItem("minimal_upload_secret");
-    }
-    return true;
-  });
+  }, []);
 
   // Submission & status
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -207,51 +197,27 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
           setSuccessMessage("Bookmark saved");
         } else {
           // Extract Audio & Upload to Supabase Storage
-          const effectiveSecret = (uploadSecret.trim() || savedSecret.trim()).trim();
-          if (!effectiveSecret) {
-            setIsEditingPasscode(true);
-            setErrorMessage("Passcode required");
-            setIsSubmitting(false);
-            return;
-          }
-
           setStatusText("Extracting audio...");
 
           const res = await fetch("/api/youtube", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "x-upload-secret": effectiveSecret,
             },
             body: JSON.stringify({
               url: trimmed,
               title: linkTitle.trim(),
               artist: linkArtist.trim(),
-              secret: effectiveSecret,
             }),
           });
 
           const data = await res.json();
 
           if (!res.ok) {
-            if (res.status === 401) {
-              if (typeof window !== "undefined") {
-                localStorage.removeItem("minimal_upload_secret");
-              }
-              setSavedSecret("");
-              setIsEditingPasscode(true);
-              throw new Error("Incorrect passcode");
-            }
             if (res.status === 429) {
               throw new Error("Rate limited. Wait 15m");
             }
             throw new Error(data.error || "Extraction failed");
-          }
-
-          if (typeof window !== "undefined" && uploadSecret.trim()) {
-            localStorage.setItem("minimal_upload_secret", uploadSecret.trim());
-            setSavedSecret(uploadSecret.trim());
-            setIsEditingPasscode(false);
           }
 
           await addSong(data.song, selectedPlaylistId || undefined);
@@ -309,13 +275,6 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
       return;
     }
 
-    const effectiveSecret = (uploadSecret.trim() || savedSecret.trim()).trim();
-    if (!effectiveSecret) {
-      setIsEditingPasscode(true);
-      setErrorMessage("Passcode required");
-      return;
-    }
-
     if (selectedFile.size > 50 * 1024 * 1024) {
       setErrorMessage("File exceeds 50 MB");
       return;
@@ -331,7 +290,6 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-upload-secret": effectiveSecret,
         },
         body: JSON.stringify({
           filename: selectedFile.name,
@@ -339,21 +297,12 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
           size: selectedFile.size,
           title: uploadTitle.trim(),
           artist: uploadArtist.trim(),
-          secret: effectiveSecret,
         }),
       });
 
       const initData = await initRes.json();
 
       if (!initRes.ok) {
-        if (initRes.status === 401) {
-          if (typeof window !== "undefined") {
-            localStorage.removeItem("minimal_upload_secret");
-          }
-          setSavedSecret("");
-          setIsEditingPasscode(true);
-          throw new Error("Incorrect passcode");
-        }
         if (initRes.status === 429) {
           throw new Error("Rate limited. Wait 15m");
         }
@@ -397,12 +346,10 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-upload-secret": effectiveSecret,
         },
         body: JSON.stringify({
           action: "complete",
           path: initData.path,
-          secret: effectiveSecret,
         }),
       });
 
@@ -413,12 +360,6 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
 
       // Add to library & playlist
       await addSong(completeData.song, selectedPlaylistId || undefined);
-
-      if (typeof window !== "undefined" && uploadSecret.trim()) {
-        localStorage.setItem("minimal_upload_secret", uploadSecret.trim());
-        setSavedSecret(uploadSecret.trim());
-        setIsEditingPasscode(false);
-      }
 
       if (typeof window !== "undefined") {
         window.dispatchEvent(new Event("storage_updated"));
@@ -669,36 +610,6 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
               </div>
             </div>
 
-            {/* Passcode UI */}
-            {selectedFile && (!savedSecret || isEditingPasscode) && (
-              <div className="relative pt-0.5">
-                <Key className="w-3.5 h-3.5 absolute left-3.5 top-3 text-zinc-500" />
-                <input
-                  type="password"
-                  value={uploadSecret}
-                  onChange={(e) => setUploadSecret(e.target.value)}
-                  placeholder="Passcode"
-                  required
-                  className="w-full pl-9 pr-3.5 py-2 rounded-xl text-xs bg-white/[0.03] border border-white/[0.08] text-white placeholder:text-zinc-500 focus:outline-none focus:border-white/30 transition-colors"
-                />
-              </div>
-            )}
-
-            {selectedFile && savedSecret && !isEditingPasscode && (
-              <div className="flex items-center justify-between text-[11px] text-zinc-500 px-1 pt-0.5">
-                <span className="flex items-center gap-1.5 text-zinc-400">
-                  <Key className="w-3 h-3 text-emerald-400" />
-                  <span>Passcode saved</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setIsEditingPasscode(true)}
-                  className="hover:text-zinc-300 transition-colors"
-                >
-                  Change
-                </button>
-              </div>
-            )}
 
             {/* Submit Button */}
             <div className="pt-1">
@@ -894,35 +805,6 @@ export function AddMusicModal({ isOpen, onClose }: AddMusicModalProps) {
               </div>
             </div>
 
-            {/* Passcode for YouTube extraction */}
-            {detectedType === "youtube" && (!savedSecret || isEditingPasscode) && (
-              <div className="relative pt-0.5">
-                <Key className="w-3.5 h-3.5 absolute left-3.5 top-3 text-zinc-500" />
-                <input
-                  type="password"
-                  value={uploadSecret}
-                  onChange={(e) => setUploadSecret(e.target.value)}
-                  placeholder="Passcode"
-                  className="w-full pl-9 pr-3.5 py-2 rounded-xl text-xs bg-white/[0.03] border border-white/[0.08] text-white placeholder:text-zinc-500 focus:outline-none focus:border-white/30 transition-colors"
-                />
-              </div>
-            )}
-
-            {detectedType === "youtube" && savedSecret && !isEditingPasscode && (
-              <div className="flex items-center justify-between text-[11px] text-zinc-500 px-1 pt-0.5">
-                <span className="flex items-center gap-1.5 text-zinc-400">
-                  <Key className="w-3 h-3 text-emerald-400" />
-                  <span>Passcode saved</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setIsEditingPasscode(true)}
-                  className="hover:text-zinc-300 transition-colors"
-                >
-                  Change
-                </button>
-              </div>
-            )}
 
             {/* Action Buttons */}
             <div className="pt-1 space-y-2">

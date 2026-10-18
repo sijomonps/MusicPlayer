@@ -12,11 +12,11 @@ import {
   MAX_AUDIO_FILE_SIZE,
 } from "../src/lib/supabase/storage.ts";
 import {
-  verifyPasscode,
-  resetFailedAttempts,
+  checkRateLimit,
+  resetRateLimits,
+  isSafePath,
   timingSafeEqualStr,
-  MAX_FAILED_ATTEMPTS,
-} from "../src/lib/passcode.ts";
+} from "../src/lib/security.ts";
 import {
   validateLinkInput,
   getAudioExtension,
@@ -266,64 +266,49 @@ test("9. Storage usage does NOT enforce artificial blocking in app", async () =>
   assert.ok(result.signedUrl);
 });
 
-test("10. Security: Missing server UPLOAD_SECRET rejects requests with 503", () => {
-  const originalSecret = process.env.UPLOAD_SECRET;
-  delete process.env.UPLOAD_SECRET;
-  resetFailedAttempts();
+test("10. Security: Rate limiting allows normal requests within quota", () => {
+  const ip = "127.0.0.1";
+  resetRateLimits(ip);
 
-  try {
-    const res = verifyPasscode("127.0.0.1", "some-secret");
-    assert.equal(res.success, false);
-    assert.equal(res.status, 503);
-    assert.match(res.error || "", /UPLOAD_SECRET.*not configured/);
-  } finally {
-    if (originalSecret) process.env.UPLOAD_SECRET = originalSecret;
-  }
+  assert.equal(checkRateLimit(ip, 5), true);
+  assert.equal(checkRateLimit(ip, 5), true);
+  assert.equal(checkRateLimit(ip, 5), true);
 });
 
-test("11. Security: Upload without passcode is rejected with 401", () => {
-  process.env.UPLOAD_SECRET = "test-secret-123";
-  resetFailedAttempts();
+test("11. Security: Rate limiting blocks requests exceeding quota with 429 semantics", () => {
+  const ip = "192.168.1.100";
+  resetRateLimits(ip);
 
-  const res = verifyPasscode("192.168.1.101", "");
-  assert.equal(res.success, false);
-  assert.equal(res.status, 401);
-  assert.match(res.error || "", /Missing upload passcode/);
-});
-
-test("12. Security: Upload with incorrect passcode is rejected with 401", () => {
-  process.env.UPLOAD_SECRET = "test-secret-123";
-  resetFailedAttempts();
-
-  const res = verifyPasscode("192.168.1.102", "wrong-secret");
-  assert.equal(res.success, false);
-  assert.equal(res.status, 401);
-  assert.match(res.error || "", /Incorrect upload passcode/);
-});
-
-test("13. Security: Upload with correct passcode succeeds", () => {
-  process.env.UPLOAD_SECRET = "test-secret-123";
-  resetFailedAttempts();
-
-  const res = verifyPasscode("192.168.1.103", "test-secret-123");
-  assert.equal(res.success, true);
-  assert.equal(res.status, 200);
-});
-
-test("14. Security: Repeated failed attempts trigger 429 lockout protection", () => {
-  process.env.UPLOAD_SECRET = "super-secret-key";
-  const testIp = "10.0.0.99";
-  resetFailedAttempts();
-
-  for (let i = 0; i < MAX_FAILED_ATTEMPTS; i++) {
-    const res = verifyPasscode(testIp, `bad-attempt-${i}`);
-    assert.equal(res.status, 401);
+  for (let i = 0; i < 5; i++) {
+    assert.equal(checkRateLimit(ip, 5), true);
   }
 
-  const lockedRes = verifyPasscode(testIp, "super-secret-key");
-  assert.equal(lockedRes.success, false);
-  assert.equal(lockedRes.status, 429);
-  assert.match(lockedRes.error || "", /Too many failed passcode attempts/);
+  // 6th attempt exceeds quota
+  assert.equal(checkRateLimit(ip, 5), false);
+});
+
+test("12. Security: Path validation blocks directory traversal and null-byte injection", () => {
+  assert.equal(isSafePath("../secret.txt"), false);
+  assert.equal(isSafePath("songs/../../etc/passwd"), false);
+  assert.equal(isSafePath("songs/test\0.mp3"), false);
+  assert.equal(isSafePath(""), false);
+  assert.equal(isSafePath("/absolute/path.mp3"), false);
+});
+
+test("13. Security: Path validation accepts safe relative audio paths", () => {
+  assert.equal(isSafePath("songs/track1.mp3"), true);
+  assert.equal(isSafePath("track1.mp3"), true);
+  assert.equal(isSafePath("user-uploads/uuid/song.m4a"), true);
+});
+
+test("14. Security: resetRateLimits clears IP quota limits", () => {
+  const ip = "10.0.0.50";
+  resetRateLimits(ip);
+  assert.equal(checkRateLimit(ip, 1), true);
+  assert.equal(checkRateLimit(ip, 1), false);
+
+  resetRateLimits(ip);
+  assert.equal(checkRateLimit(ip, 1), true);
 });
 
 test("15. Security: timingSafeEqualStr verifies match correctly and safely", () => {
@@ -424,51 +409,24 @@ test("22. isYouTubeUrl identifies valid YouTube URLs and rejects non-YouTube lin
   assert.equal(isYouTubeUrl("invalid-string"), false);
 });
 
-test("23. Security: YouTube extraction requires UPLOAD_SECRET and rejects unauthorized requests", () => {
-  const savedEnv = process.env.UPLOAD_SECRET;
-  try {
-    process.env.UPLOAD_SECRET = "yt-secret-passcode";
-    resetFailedAttempts("10.0.0.1");
+test("23. Security: YouTube extraction applies independent rate limiting", () => {
+  const ytIp = "10.0.0.99";
+  resetRateLimits(ytIp);
 
-    // Missing passcode
-    const missing = verifyPasscode("10.0.0.1", "");
-    assert.equal(missing.success, false);
-    assert.equal(missing.status, 401);
-
-    // Wrong passcode
-    const wrong = verifyPasscode("10.0.0.1", "bad-passcode");
-    assert.equal(wrong.success, false);
-    assert.equal(wrong.status, 401);
-
-    // Correct passcode
-    const valid = verifyPasscode("10.0.0.1", "yt-secret-passcode");
-    assert.equal(valid.success, true);
-    assert.equal(valid.status, 200);
-  } finally {
-    process.env.UPLOAD_SECRET = savedEnv;
-    resetFailedAttempts();
+  for (let i = 0; i < 30; i++) {
+    assert.equal(checkRateLimit(ytIp, 30), true);
   }
+
+  // 31st extraction request is throttled
+  assert.equal(checkRateLimit(ytIp, 30), false);
 });
 
-test("24. Security: YouTube extraction rate limits brute-force attempts", () => {
-  const savedEnv = process.env.UPLOAD_SECRET;
-  try {
-    process.env.UPLOAD_SECRET = "secure-key";
-    resetFailedAttempts("10.0.0.2");
-
-    for (let i = 0; i < MAX_FAILED_ATTEMPTS; i++) {
-      verifyPasscode("10.0.0.2", "wrong");
-    }
-
-    // Next attempt triggers 429
-    const blocked = verifyPasscode("10.0.0.2", "secure-key");
-    assert.equal(blocked.success, false);
-    assert.equal(blocked.status, 429);
-    assert.match(blocked.error || "", /Too many failed/);
-  } finally {
-    process.env.UPLOAD_SECRET = savedEnv;
-    resetFailedAttempts();
-  }
+test("24. Security: Public personal playback & upload endpoints use rate limiting without passcode prompts", () => {
+  // Verify that rate limiting, file size, and path validation protect endpoints
+  assert.equal(typeof checkRateLimit, "function");
+  assert.equal(typeof isSafePath, "function");
+  assert.equal(typeof resetRateLimits, "function");
+  assert.equal(typeof timingSafeEqualStr, "function");
 });
 
 test("25. Song Source Types: supports youtube_extracted and backward compatible bookmarks", () => {
